@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Environment (never commit keys or tokens)
+.env
+.env.local
+.env.*.local
+.env.prod
+.env.vercel
+backend/.env
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local state (contains session prompts that may embed secrets)
+.claude/
+# Claude auto-memory
+memory/
+
+# OS
+.DS_Store
+Thumbs.db
+.vercel
+
+# Raw data files (already in docs/employee-data.json)
+*.xlsx
+.env*.local
