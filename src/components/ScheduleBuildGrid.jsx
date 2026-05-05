@@ -178,11 +178,20 @@ const ScheduleBuildGridInner = forwardRef(function ScheduleBuildGridInner(
   const [saveName, setSaveName] = useState('');
   const [saveRepeatUntil, setSaveRepeatUntil] = useState('');
 
-  // Helper: add N days to a date string
+  // Helper: add N days to a YYYY-MM-DD string. Uses UTC math throughout so
+  // the result is timezone-independent. The previous version constructed a
+  // local-time Date and then re-formatted via toISOString(), which silently
+  // rolled the date back by one day for any browser east of UTC (IST etc.) —
+  // e.g. addDaysStr('2026-05-04', 7) returned '2026-05-10' instead of
+  // '2026-05-11', shifting every repeated week's pattern by a day in the DB.
   const addDaysStr = (dateStr, n) => {
-    const d = new Date(dateStr + 'T00:00:00');
-    d.setDate(d.getDate() + n);
-    return d.toISOString().slice(0, 10);
+    const [y, m, day] = dateStr.split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 1, day));
+    d.setUTCDate(d.getUTCDate() + n);
+    const yy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
   };
 
   // Build base week assignments from the grid
@@ -207,13 +216,22 @@ const ScheduleBuildGridInner = forwardRef(function ScheduleBuildGridInner(
 
     const assignments = [];
     const leaveEntries = [];
+    // Three-way scope:
+    //   1) Checkboxes ticked → save only those people.
+    //   2) Else cells were edited → save only the people whose rows were touched.
+    //   3) Else (nothing ticked, nothing edited) → save EVERY displayed row,
+    //      so the user can extend an already-loaded pattern across a
+    //      repeat-until range without first having to re-touch every cell.
     realRows.forEach((row) => {
-      // Skip rows not in target set — prevents overwriting unchanged schedules
       if (targetUserIds.size > 0 && !targetUserIds.has(row.user_id)) return;
       dates.forEach((date) => {
         const val = getCell(row.user_id, date);
         if (val === 'LEAVE') {
-          assignments.push({ user_id: row.user_id, shift_date: date, is_off: true });
+          // _fromLeave marks an OFF day that came from a one-off LEAVE cell.
+          // Confirm-save uses this flag to AVOID propagating the leave to
+          // future repeated weeks — week 0 keeps the leave, weeks 1+ swap it
+          // for the user's most-common shift instead.
+          assignments.push({ user_id: row.user_id, shift_date: date, is_off: true, _fromLeave: true });
           leaveEntries.push({ user_id: row.user_id, date });
         } else {
           const isOff = !val || val === 'OFF';
@@ -230,6 +248,31 @@ const ScheduleBuildGridInner = forwardRef(function ScheduleBuildGridInner(
     });
     return { assignments, leaveEntries };
   }, [realRows, dates, getCell, edits, selectedRows]);
+
+  // Compute each user's "mode" shift across the displayed week — i.e. their
+  // most-common shift time, ignoring OFF and LEAVE cells. Used to fill in
+  // LEAVE days in repeated weeks (a leave is a one-off, not a pattern, so
+  // future weeks should fall back to the user's normal shift).
+  const userModeShift = useCallback(() => {
+    const result = {};
+    realRows.forEach((row) => {
+      const counts = new Map();
+      dates.forEach((date) => {
+        const v = getCell(row.user_id, date);
+        if (!v || v === 'OFF' || v === 'LEAVE') return;
+        const times = parseShiftValue(v);
+        if (!times) return;
+        const key = `${times[0]}-${times[1]}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+      let best = null, bestCount = 0;
+      for (const [k, c] of counts) {
+        if (c > bestCount) { best = k; bestCount = c; }
+      }
+      if (best) result[row.user_id] = best;
+    });
+    return result;
+  }, [realRows, dates, getCell]);
 
   // Open save modal instead of saving directly
   const triggerSave = useCallback(() => {
@@ -265,17 +308,39 @@ const ScheduleBuildGridInner = forwardRef(function ScheduleBuildGridInner(
     const endMs = new Date(endDate + 'T00:00:00').getTime();
     const totalWeeks = Math.max(1, Math.ceil((endMs - startMs + 86400000) / (7 * 86400000)));
 
-    // Build all assignments across all weeks
+    // Build all assignments across all weeks.
+    // LEAVE handling: a LEAVE cell only applies to the original week. For
+    // every subsequent repeated week, swap it for that user's most-common
+    // shift (mode). The leave-request entry itself is also NOT propagated —
+    // it would otherwise create approved leaves spanning months.
+    const modeByUser = userModeShift();
     const allAssignments = [];
     const allLeaves = [];
     for (let w = 0; w < totalWeeks; w++) {
       const offset = w * 7;
       baseAssignments.forEach((a) => {
-        allAssignments.push({ ...a, shift_date: addDaysStr(a.shift_date, offset) });
+        const repeated = { ...a, shift_date: addDaysStr(a.shift_date, offset) };
+        if (a._fromLeave && w > 0) {
+          // Replace the leave-derived OFF with the user's mode shift; if
+          // they have no mode (e.g. OFF every other day), keep it OFF.
+          const mode = modeByUser[a.user_id];
+          if (mode) {
+            const [start, end] = mode.split('-');
+            repeated.is_off = false;
+            repeated.shift_start_time = start;
+            repeated.shift_end_time = end;
+          }
+        }
+        // Strip the synthetic flag before sending to the backend.
+        delete repeated._fromLeave;
+        allAssignments.push(repeated);
       });
-      baseLeaves.forEach((l) => {
-        allLeaves.push({ ...l, date: addDaysStr(l.date, offset) });
-      });
+      // Only week 0 produces leave_request rows.
+      if (w === 0) {
+        baseLeaves.forEach((l) => {
+          allLeaves.push({ ...l, date: addDaysStr(l.date, offset) });
+        });
+      }
     }
 
     const body = { assignments: allAssignments };
@@ -291,7 +356,7 @@ const ScheduleBuildGridInner = forwardRef(function ScheduleBuildGridInner(
     onSave(body);
     setShowSaveModal(false);
     setSaveName('');
-  }, [buildBaseAssignments, dates, saveRepeatUntil, clientId, departmentId, saveName, onSaveTemplate, getCurrentGridData, onSave]);
+  }, [buildBaseAssignments, userModeShift, dates, saveRepeatUntil, clientId, departmentId, saveName, onSaveTemplate, getCurrentGridData, onSave]);
 
   useImperativeHandle(ref, () => ({ getCurrentGridData, triggerSave }), [getCurrentGridData, triggerSave]);
 

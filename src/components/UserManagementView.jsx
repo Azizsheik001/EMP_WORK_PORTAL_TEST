@@ -99,8 +99,24 @@ export default function UserManagementView({ isDark, currentUser, clients = [], 
       list = list.filter((u) => (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q) || (u.designation || '').toLowerCase().includes(q));
     }
     if (filterRole) list = list.filter((u) => u.role === filterRole);
-    if (filterDept) list = list.filter((u) => u.department_id === filterDept);
-    if (filterClient) list = list.filter((u) => u.client_id === filterClient);
+    if (filterDept) {
+      list = list.filter((u) => {
+        const ids = Array.isArray(u.department_ids) ? u.department_ids : [];
+        if (ids.length > 0) return ids.includes(filterDept);
+        return u.department_id === filterDept;
+      });
+    }
+    if (filterClient) {
+      // Junction-priority: if the user has any client_ids, only those count.
+      // Otherwise fall back to the legacy primary client_id. Without this,
+      // a stale primary leaks the user into clients they're no longer
+      // assigned to.
+      list = list.filter((u) => {
+        const ids = Array.isArray(u.client_ids) ? u.client_ids : [];
+        if (ids.length > 0) return ids.includes(filterClient);
+        return u.client_id === filterClient;
+      });
+    }
     if (filterStatus === 'active') list = list.filter((u) => u.is_active !== false);
     if (filterStatus === 'inactive') list = list.filter((u) => u.is_active === false);
 
@@ -415,9 +431,22 @@ export default function UserManagementView({ isDark, currentUser, clients = [], 
                       <RoleBadge user={{ name: u.name, role: u.role }} />
                       <span className="ml-1 text-xs">{ROLE_LABELS[u.role] || u.role}</span>
                     </td>
-                    <td className={tdClass}>{getDeptName(u.department_id) || <span className="text-gray-400">--</span>}</td>
+                    <td className={tdClass}>{(() => {
+                      const ids = Array.isArray(u.department_ids) ? u.department_ids : [];
+                      const list = ids.length > 0 ? ids : (u.department_id ? [u.department_id] : []);
+                      const names = list.map(getDeptName).filter(Boolean);
+                      return names.length > 0 ? names.join(', ') : <span className="text-gray-400">--</span>;
+                    })()}</td>
                     <td className={tdClass}>{u.phone || <span className="text-gray-400">--</span>}</td>
-                    <td className={tdClass}>{getClientName(u.client_id) || <span className="text-gray-400">--</span>}</td>
+                    <td className={tdClass}>{(() => {
+                      // Show every client the user is currently assigned to —
+                      // junction first, falling back to the legacy primary
+                      // when the user has no junction rows.
+                      const ids = Array.isArray(u.client_ids) ? u.client_ids : [];
+                      const list = ids.length > 0 ? ids : (u.client_id ? [u.client_id] : []);
+                      const names = list.map(getClientName).filter(Boolean);
+                      return names.length > 0 ? names.join(', ') : <span className="text-gray-400">--</span>;
+                    })()}</td>
                     <td className={tdClass}>{u.team_lead_id ? getUserName(u.team_lead_id) || <span className="text-gray-400">--</span> : <span className="text-gray-400">--</span>}</td>
                     <td className={tdClass}>{u.manager_id ? getUserName(u.manager_id) || <span className="text-gray-400">--</span> : <span className="text-gray-400">--</span>}</td>
                     <td className={tdClass} onClick={(e) => e.stopPropagation()}>
@@ -645,7 +674,12 @@ export default function UserManagementView({ isDark, currentUser, clients = [], 
                         <>
                           <span className={`flex-1 text-sm font-medium ${isDark ? 'text-gray-200' : 'text-gray-800'}`}>{client.name}</span>
                           <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${isDark ? 'bg-slate-600 text-gray-400' : 'bg-gray-200 text-gray-500'}`}>
-                            {users.filter((u) => u.client_id === client.id && u.is_active !== false).length}
+                            {users.filter((u) => {
+                              if (u.is_active === false) return false;
+                              const ids = Array.isArray(u.client_ids) ? u.client_ids : [];
+                              if (ids.length > 0) return ids.includes(client.id);
+                              return u.client_id === client.id;
+                            }).length}
                           </span>
                           <button type="button" onClick={() => { setEditingClientId(client.id); setEditingClientName(client.name); }} className="text-xs text-brand hover:underline flex-shrink-0">Edit</button>
                           <button type="button" onClick={() => handleDeleteClient(client.id)} className="text-xs text-red-500 hover:underline flex-shrink-0">Delete</button>

@@ -61,6 +61,11 @@ const SUB_TABS = [
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
     </svg>
   )},
+  { id: 'templates', label: 'Templates', icon: (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+    </svg>
+  )},
 ];
 
 export default function SchedulesView({ clients = [], isDark, defaultBuildMode = false, showUpload = false, allUsers = [], departments = [] }) {
@@ -178,6 +183,12 @@ export default function SchedulesView({ clients = [], isDark, defaultBuildMode =
       const data = await api.shiftsGrid(range.from, range.to, clientId || undefined, departmentId || undefined);
       setGrid(data);
       setBuildRows(data.rows || []);
+      // Remount the grid so the in-memory `edits` and `selectedRows` state in
+      // ScheduleBuildGrid is cleared. Without this, stale local edits keep
+      // overlaying the freshly fetched server values, and the next save would
+      // re-include those old edits and overwrite them across the new
+      // repeat-until range — which makes saves look like they "didn't stick".
+      setBuildKey((k) => k + 1);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (e) {
@@ -279,8 +290,35 @@ export default function SchedulesView({ clients = [], isDark, defaultBuildMode =
         <UploadSchedules isDark={isDark} clients={clients} allUsers={allUsers} />
       )}
 
+      {/* Templates sub-tab */}
+      {subTab === 'templates' && (
+        <TemplatesPanel
+          templates={templates}
+          isDark={isDark}
+          onDelete={(id) => {
+            deleteStoredTemplate(id);
+            setTemplates(getStoredTemplates());
+          }}
+          onExport={handleExportTemplates}
+          onImport={handleImportTemplates}
+          onApply={(template) => {
+            // Switch to Build mode, set client/dept filter, and stage the
+            // template's rows so the user lands on a populated week ready to
+            // confirm/save.
+            setSubTab('build');
+            if (template.clientId !== undefined) setClientId(template.clientId || '');
+            // Bumping buildKey resets the inner grid state; we then push the
+            // template into buildRows on the next tick once the grid mounts
+            // with the new client/dept.
+            setBuildKey((k) => k + 1);
+            setBuildRows(template.rows || []);
+            setGrid({ dates: template.dates || [], rows: template.rows || [] });
+          }}
+        />
+      )}
+
       {/* View / Build sub-tabs */}
-      {subTab !== 'upload' && (
+      {subTab !== 'upload' && subTab !== 'templates' && (
         <>
           <div className="flex flex-wrap items-center gap-4">
             <DateRangeFilter
@@ -360,6 +398,131 @@ export default function SchedulesView({ clients = [], isDark, defaultBuildMode =
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function TemplatesPanel({ templates, isDark, onDelete, onExport, onImport, onApply }) {
+  const [openId, setOpenId] = useState(templates[0]?.id || '');
+  const open = templates.find((t) => t.id === openId) || templates[0] || null;
+
+  if (!templates || templates.length === 0) {
+    return (
+      <div className={`rounded-lg border p-6 text-sm ${isDark ? 'border-slate-700 bg-slate-800/50 text-gray-300' : 'border-gray-200 bg-gray-50 text-gray-600'}`}>
+        <p>No saved schedule templates yet.</p>
+        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          Templates are saved when you give a name in the "Save schedule" dialog while building. Imported templates also land here.
+        </p>
+        <div className="mt-3">
+          <label className={`inline-block px-3 py-1.5 rounded-lg border text-xs cursor-pointer ${isDark ? 'border-slate-600 text-gray-300' : 'border-gray-300 text-gray-700'}`}>
+            Import templates
+            <input type="file" accept=".json,application/json" className="hidden" onChange={onImport} />
+          </label>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onExport}
+          className={`px-3 py-1.5 rounded-lg border text-sm ${isDark ? 'border-slate-600 text-gray-300' : 'border-gray-300 text-gray-700'}`}
+        >
+          Export templates
+        </button>
+        <label className={`px-3 py-1.5 rounded-lg border text-sm cursor-pointer ${isDark ? 'border-slate-600 text-gray-300' : 'border-gray-300 text-gray-700'}`}>
+          Import templates
+          <input type="file" accept=".json,application/json" className="hidden" onChange={onImport} />
+        </label>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Template list */}
+        <div className={`rounded-lg border ${isDark ? 'border-slate-700 bg-slate-800/50' : 'border-gray-200 bg-white'} overflow-hidden`}>
+          <div className={`px-3 py-2 text-xs font-semibold uppercase tracking-wider border-b ${isDark ? 'border-slate-700 text-gray-400' : 'border-gray-200 text-gray-500'}`}>
+            {templates.length} saved template{templates.length === 1 ? '' : 's'}
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto divide-y divide-gray-100 dark:divide-slate-700">
+            {templates.map((t) => {
+              const active = open && open.id === t.id;
+              const dateRange = (t.dates && t.dates.length > 0)
+                ? `${t.dates[0]} → ${t.dates[t.dates.length - 1]}`
+                : '—';
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setOpenId(t.id)}
+                  className={`w-full text-left px-3 py-2.5 transition-colors ${
+                    active
+                      ? (isDark ? 'bg-brand/15' : 'bg-brand/5')
+                      : (isDark ? 'hover:bg-slate-700/50' : 'hover:bg-gray-50')
+                  }`}
+                >
+                  <p className="text-sm font-medium text-gray-900 dark:text-white truncate">{t.name || 'Untitled'}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    {t.clientName ? `${t.clientName} · ` : ''}{dateRange}
+                  </p>
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">
+                    {(t.rows || []).filter((r) => r.user_id !== '_pattern').length} employees · saved {t.savedAt ? new Date(t.savedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Template detail */}
+        <div className="lg:col-span-2 space-y-3">
+          {open ? (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-white">{open.name || 'Untitled'}</h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {open.clientName || 'All clients'}
+                    {open.dates && open.dates.length > 0 && (
+                      <> · {open.dates[0]} → {open.dates[open.dates.length - 1]}</>
+                    )}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onApply(open)}
+                    className="px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-hover text-white text-sm font-medium"
+                  >
+                    Use in Build
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`Delete template "${open.name || 'Untitled'}"?`)) {
+                        onDelete(open.id);
+                        setOpenId('');
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-red-300 dark:border-red-800/60 text-red-600 dark:text-red-400 text-sm"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+              <ScheduleGridView
+                dates={open.dates || []}
+                rows={(open.rows || []).filter((r) => r.user_id !== '_pattern')}
+                isDark={isDark}
+                scheduleInfo={null}
+              />
+            </>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400">Select a template on the left to preview the week.</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

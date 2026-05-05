@@ -16,6 +16,62 @@ function dbQuery(sql, params) {
   return getPool().query(sql, params);
 }
 
+// SQL fragments that resolve "is user U a member of client/department named N?"
+// using **junction-priority** logic:
+//   * If the user has ANY rows in the junction table (user_client_assignments /
+//     user_department_assignments), the junction is the only source of truth.
+//   * Otherwise (no junction rows for that user), fall back to the legacy
+//     primary column on users (users.client_id / users.department_id).
+//
+// The previous OR-based check was too permissive: a stale primary client_id
+// (e.g. left over from a prior assignment) leaked the user into the wrong
+// client's lists even though their current junction rows pointed elsewhere.
+//
+// Use a placeholder index for the search term, e.g.:
+//   params.push(`%${name.toLowerCase()}%`);
+//   const clause = userInClientByName(params.length);
+//
+// The fragments use case-insensitive partial matching (LOWER + LIKE) so the
+// agent doesn't have to know exact casing or full names.
+function userInClientByName(paramIdx, alias = 'u') {
+  return `EXISTS (
+    SELECT 1 FROM clients c
+    WHERE LOWER(c.name) LIKE $${paramIdx}
+      AND (
+        CASE
+          WHEN EXISTS (SELECT 1 FROM user_client_assignments uca0 WHERE uca0.user_id = ${alias}.id)
+          THEN EXISTS (
+            SELECT 1 FROM user_client_assignments uca
+            WHERE uca.user_id = ${alias}.id AND uca.client_id = c.id
+          )
+          ELSE c.id = ${alias}.client_id
+        END
+      )
+  )`;
+}
+function userInDepartmentByName(paramIdx, alias = 'u') {
+  return `EXISTS (
+    SELECT 1 FROM departments d
+    WHERE LOWER(d.name) LIKE $${paramIdx}
+      AND (
+        CASE
+          WHEN EXISTS (SELECT 1 FROM user_department_assignments uda0 WHERE uda0.user_id = ${alias}.id)
+          THEN EXISTS (
+            SELECT 1 FROM user_department_assignments uda
+            WHERE uda.user_id = ${alias}.id AND uda.department_id = d.id
+          )
+          ELSE d.id = ${alias}.department_id
+        END
+      )
+  )`;
+}
+// Forgiving combo: matches against either the client OR the department name.
+// Use when the agent might pass a department name as `client_name` (or vice
+// versa) — common because users phrase questions loosely.
+function userInClientOrDepartmentByName(paramIdx, alias = 'u') {
+  return `(${userInClientByName(paramIdx, alias)} OR ${userInDepartmentByName(paramIdx, alias)})`;
+}
+
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const toDateStr = (d) => {
   if (!d) return null;
@@ -59,14 +115,37 @@ const getWorkforceStats = new FunctionTool({
 
 const getLeavesToday = new FunctionTool({
   name: 'get_leaves_today',
-  description: 'Get employees who are on approved leave today.',
-  parameters: {},
-  execute: async () => {
+  description: 'Get employees who are on approved leave today. Optional client_name / department_name filter (partial, case-insensitive, junction-aware) for "who is on leave from Ameresco today" or "who is absent on leave in Tech team today".',
+  parameters: {
+    type: 'object',
+    properties: {
+      client_name: { type: 'string', description: 'Optional client name to filter (partial OK).' },
+      department_name: { type: 'string', description: 'Optional department name to filter (partial OK).' },
+    },
+  },
+  execute: async ({ client_name, department_name } = {}) => {
+    const params = [today()];
+    const extras = [];
+    if (client_name) {
+      params.push(`%${client_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
+    if (department_name) {
+      params.push(`%${department_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
     const { rows } = await dbQuery(`
-      SELECT u.name, c.name as client, lr.leave_type, lr.start_date, lr.end_date
-      FROM leave_requests lr JOIN users u ON lr.employee_id = u.id LEFT JOIN clients c ON u.client_id = c.id
-      WHERE lr.status = 'approved' AND $1 BETWEEN lr.start_date AND lr.end_date ORDER BY u.name
-    `, [today()]);
+      SELECT u.name, c.name as client, d.name as department,
+             lr.leave_type, lr.start_date, lr.end_date
+      FROM leave_requests lr
+      JOIN users u ON lr.employee_id = u.id
+      LEFT JOIN clients c ON u.client_id = c.id
+      LEFT JOIN departments d ON u.department_id = d.id
+      WHERE lr.status = 'approved'
+        AND $1 BETWEEN lr.start_date AND lr.end_date
+        ${extras.join(' ')}
+      ORDER BY u.name
+    `, params);
     return JSON.stringify({ count: rows.length, employees: rows });
   },
 });
@@ -105,17 +184,16 @@ const getClockedInEmployees = new FunctionTool({
 
     const params = [targetDate];
     const filters = [];
-    // Forgiving filters: each term matches against BOTH the client name AND the department name (case-insensitive, LIKE-based).
-    // This way the tool works regardless of whether the agent passes a term under client_name or department_name.
+    // Forgiving filters: each term matches against BOTH the client name AND the department name,
+    // and across BOTH the primary column on users AND the multi-assignment junction tables.
+    // This way someone assigned to Ameresco only via user_client_assignments still surfaces.
     if (client_name) {
       params.push(`%${client_name.toLowerCase()}%`);
-      const idx = params.length;
-      filters.push(`AND (LOWER(c.name) LIKE $${idx} OR LOWER(d.name) LIKE $${idx})`);
+      filters.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
     }
     if (department_name) {
       params.push(`%${department_name.toLowerCase()}%`);
-      const idx = params.length;
-      filters.push(`AND (LOWER(d.name) LIKE $${idx} OR LOWER(c.name) LIKE $${idx})`);
+      filters.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
     }
     const clientFilter = filters[0] || '';
     const deptFilter = filters[1] || '';
@@ -188,46 +266,102 @@ const getClockedInEmployees = new FunctionTool({
 
 const getEmployeesByClient = new FunctionTool({
   name: 'get_employees_by_client',
-  description: 'Get all active employees assigned to a specific client.',
+  description: 'Get all active employees assigned to a specific client. Matches BOTH the user\'s primary client and any multi-client assignments (so an employee tagged to Ameresco AND Standard Solar will surface for either client). Partial / case-insensitive name match — "amer" matches "Ameresco".',
   parameters: {
     type: 'object',
-    properties: { client_name: { type: 'string', description: 'Client name (e.g. Ameresco, Cleanleaf, Puresky, Standard Solar, Triforce, MaxSolar, Metlen, TSR)' } },
+    properties: { client_name: { type: 'string', description: 'Client name (e.g. Ameresco, Cleanleaf, Puresky, Standard Solar, Triforce, MaxSolar, Metlen, TSR). Partial match supported.' } },
     required: ['client_name'],
   },
   execute: async ({ client_name }) => {
+    // Aggregate every client a user belongs to so the response is honest about
+    // multi-client people. We also pull the matched-client display name for
+    // the "client" field to keep the existing response shape compatible.
+    const params = [`%${client_name.toLowerCase()}%`];
     const { rows } = await dbQuery(`
-      SELECT u.name, u.email, u.role, u.employee_no, u.designation, c.name as client
-      FROM users u JOIN clients c ON u.client_id = c.id
-      WHERE LOWER(c.name) = LOWER($1) AND u.is_active = true AND u.deleted_at IS NULL
+      SELECT u.name, u.email, u.role, u.employee_no, u.designation,
+             COALESCE(
+               -- Junction-priority: if the user has junction rows, list ONLY
+               -- those. Otherwise fall back to the legacy primary client.
+               (SELECT string_agg(DISTINCT c2.name, ', ' ORDER BY c2.name)
+                FROM clients c2
+                WHERE EXISTS (SELECT 1 FROM user_client_assignments uca0 WHERE uca0.user_id = u.id)
+                  AND c2.id IN (SELECT uca.client_id FROM user_client_assignments uca WHERE uca.user_id = u.id)),
+               (SELECT c3.name FROM clients c3 WHERE c3.id = u.client_id),
+               'Unassigned'
+             ) AS client
+      FROM users u
+      WHERE u.is_active = true AND u.deleted_at IS NULL
+        AND ${userInClientByName(1)}
       ORDER BY u.role, u.name
-    `, [client_name]);
+    `, params);
     return JSON.stringify({ count: rows.length, client: client_name, employees: rows });
   },
 });
 
 const getTeamLeads = new FunctionTool({
   name: 'get_team_leads',
-  description: 'Get all team leads in the organization.',
-  parameters: {},
-  execute: async () => {
+  description: 'Get all team leads in the organization. Optional client_name / department_name filter (partial, junction-aware) for "who are the team leads for Ameresco" or "team leads in Tech department".',
+  parameters: {
+    type: 'object',
+    properties: {
+      client_name: { type: 'string', description: 'Optional client name to filter (partial OK).' },
+      department_name: { type: 'string', description: 'Optional department name to filter (partial OK).' },
+    },
+  },
+  execute: async ({ client_name, department_name } = {}) => {
+    const params = [];
+    const extras = [];
+    if (client_name) {
+      params.push(`%${client_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
+    if (department_name) {
+      params.push(`%${department_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
     const { rows } = await dbQuery(`
-      SELECT u.name, u.email, u.employee_no, c.name as client, u.designation
-      FROM users u LEFT JOIN clients c ON u.client_id = c.id
-      WHERE u.role = 'team_lead' AND u.is_active = true AND u.deleted_at IS NULL ORDER BY u.name
-    `);
+      SELECT u.name, u.email, u.employee_no, c.name as client, d.name as department, u.designation
+      FROM users u
+      LEFT JOIN clients c ON u.client_id = c.id
+      LEFT JOIN departments d ON u.department_id = d.id
+      WHERE u.role = 'team_lead' AND u.is_active = true AND u.deleted_at IS NULL
+        ${extras.join(' ')}
+      ORDER BY u.name
+    `, params);
     return JSON.stringify({ count: rows.length, team_leads: rows });
   },
 });
 
 const getManagers = new FunctionTool({
   name: 'get_managers',
-  description: 'Get all managers in the organization.',
-  parameters: {},
-  execute: async () => {
+  description: 'Get all managers in the organization. Optional client_name / department_name filter (partial, junction-aware).',
+  parameters: {
+    type: 'object',
+    properties: {
+      client_name: { type: 'string', description: 'Optional client name to filter (partial OK).' },
+      department_name: { type: 'string', description: 'Optional department name to filter (partial OK).' },
+    },
+  },
+  execute: async ({ client_name, department_name } = {}) => {
+    const params = [];
+    const extras = [];
+    if (client_name) {
+      params.push(`%${client_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
+    if (department_name) {
+      params.push(`%${department_name.toLowerCase()}%`);
+      extras.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
     const { rows } = await dbQuery(`
-      SELECT u.name, u.email, u.employee_no, u.designation
-      FROM users u WHERE u.role = 'manager' AND u.is_active = true AND u.deleted_at IS NULL ORDER BY u.name
-    `);
+      SELECT u.name, u.email, u.employee_no, c.name as client, d.name as department, u.designation
+      FROM users u
+      LEFT JOIN clients c ON u.client_id = c.id
+      LEFT JOIN departments d ON u.department_id = d.id
+      WHERE u.role = 'manager' AND u.is_active = true AND u.deleted_at IS NULL
+        ${extras.join(' ')}
+      ORDER BY u.name
+    `, params);
     return JSON.stringify({ count: rows.length, managers: rows });
   },
 });
@@ -445,22 +579,31 @@ const getEmployeeAttendance = new FunctionTool({
 
 const getAttendanceSummary = new FunctionTool({
   name: 'get_attendance_summary',
-  description: 'Get attendance summary for a specific date or date range. Shows who was present, absent, late. Good for "who was absent yesterday", "attendance on March 10".',
+  description: 'Get attendance summary for a specific date. Shows who was present, absent, or late. Filterable by client OR department, with partial / case-insensitive matching, and matches users assigned via either the primary column or the multi-assignment junctions. Use for "who was absent yesterday", "absentees in Ameresco today", "who was late in Tech team".',
   parameters: {
     type: 'object',
     properties: {
       date: { type: 'string', description: 'Date in YYYY-MM-DD format (default today)' },
-      client_name: { type: 'string', description: 'Optional client name to filter' },
+      client_name: { type: 'string', description: 'Optional client name (partial OK). Matches across clients OR departments.' },
+      department_name: { type: 'string', description: 'Optional department name (partial OK). Matches across departments OR clients.' },
     },
   },
-  execute: async ({ date, client_name }) => {
+  execute: async ({ date, client_name, department_name }) => {
     const targetDate = date || today();
     const params = [targetDate];
-    let clientFilter = '';
-    if (client_name) { clientFilter = 'AND LOWER(c.name) = LOWER($2)'; params.push(client_name); }
+    const extraFilters = [];
+    if (client_name) {
+      params.push(`%${client_name.toLowerCase()}%`);
+      extraFilters.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
+    if (department_name) {
+      params.push(`%${department_name.toLowerCase()}%`);
+      extraFilters.push(`AND ${userInClientOrDepartmentByName(params.length)}`);
+    }
+    const memberFilter = extraFilters.join(' ');
 
     const { rows } = await dbQuery(`
-      SELECT u.name, u.role, c.name as client,
+      SELECT u.name, u.role, c.name as client, d.name as department,
         sa.shift_start_time, sa.shift_end_time,
         (SELECT ce.created_at FROM clock_events ce
          WHERE ce.user_id = u.id AND ce.shift_date = $1 AND ce.event_type IN ('clock_in','in')
@@ -471,24 +614,35 @@ const getAttendanceSummary = new FunctionTool({
       FROM shift_assignments sa
       JOIN users u ON u.id = sa.user_id
       LEFT JOIN clients c ON c.id = u.client_id
-      WHERE sa.shift_date = $1 AND u.is_active = true AND u.deleted_at IS NULL ${clientFilter}
+      LEFT JOIN departments d ON d.id = u.department_id
+      WHERE sa.shift_date = $1 AND u.is_active = true AND u.deleted_at IS NULL ${memberFilter}
       ORDER BY u.name
     `, params);
 
     const GRACE = 30;
     let present = 0, absent = 0, late = 0;
     const summary = rows.map(r => {
-      if (!r.first_clock_in) { absent++; return { name: r.name, client: r.client, status: 'absent' }; }
+      const base = { name: r.name, client: r.client, department: r.department };
+      if (!r.first_clock_in) { absent++; return { ...base, status: 'absent' }; }
       const cin = new Date(r.first_clock_in);
       const cinIST = cin.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
       const [sh, sm] = (r.shift_start_time || '09:00').split(':').map(Number);
       const [ch, cm] = cinIST.split(':').map(Number);
       const lateBy = (ch * 60 + cm) - (sh * 60 + sm);
-      if (lateBy > GRACE) { late++; present++; return { name: r.name, client: r.client, status: 'late', clock_in: cinIST, late_by: `${lateBy - GRACE} mins` }; }
-      present++; return { name: r.name, client: r.client, status: 'on_time', clock_in: cinIST };
+      if (lateBy > GRACE) { late++; present++; return { ...base, status: 'late', clock_in: cinIST, late_by: `${lateBy - GRACE} mins` }; }
+      present++; return { ...base, status: 'on_time', clock_in: cinIST };
     });
 
-    return JSON.stringify({ date: targetDate, total: rows.length, present, absent, late, employees: summary });
+    return JSON.stringify({
+      date: targetDate,
+      total: rows.length,
+      present, absent, late,
+      filters: {
+        ...(client_name ? { client: client_name } : {}),
+        ...(department_name ? { department: department_name } : {}),
+      },
+      employees: summary,
+    });
   },
 });
 

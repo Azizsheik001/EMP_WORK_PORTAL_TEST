@@ -159,13 +159,17 @@ async function fireMobileLogoutAlert(userId, userAgent) {
     try { await pool.query(`ALTER TABLE admin_alerts ADD COLUMN IF NOT EXISTS recipient_user_id UUID REFERENCES users(id)`); } catch (_e) {}
 
     const { rows: [user] } = await pool.query(
-      `SELECT name, manager_id FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      `SELECT name, manager_id, team_lead_id FROM users WHERE id = $1 AND deleted_at IS NULL`,
       [userId]
     );
     if (!user) return;
 
+    // Recipients: the user's direct manager(s) + team lead(s) + CEO (admin) + Shiva.
+    // Scope deliberately narrow per product owner request — do not broadcast to
+    // every manager/TL of the user's client or department.
     const recipientSet = new Set();
     if (user.manager_id) recipientSet.add(user.manager_id);
+    if (user.team_lead_id) recipientSet.add(user.team_lead_id);
 
     // Multi-manager junction (if enabled)
     try {
@@ -174,6 +178,15 @@ async function fireMobileLogoutAlert(userId, userAgent) {
         [userId]
       );
       for (const row of mgrJ.rows) recipientSet.add(row.manager_id);
+    } catch (_e) { /* table may not exist */ }
+
+    // Multi-team-lead junction (if enabled)
+    try {
+      const tlJ = await pool.query(
+        `SELECT team_lead_id FROM user_team_lead_assignments WHERE user_id = $1`,
+        [userId]
+      );
+      for (const row of tlJ.rows) recipientSet.add(row.team_lead_id);
     } catch (_e) { /* table may not exist */ }
 
     // CEO = admin(s)

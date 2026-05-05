@@ -10,61 +10,47 @@ const router = Router();
 // admin activates/deactivates someone or moves them between clients/departments.
 // Recipients: FROM-side manager + TL, TO-side manager + TL, plus CEO and CFO.
 
-async function collectSideRecipients({ department_id, client_id }) {
+// Subject-only recipients: the user's own primary team_lead + manager (plus
+// any junction table entries). Used to keep user-change alerts scoped to
+// people directly responsible for the affected user, not every manager/TL
+// of their department or client.
+async function collectSubjectSupervisors(userId) {
   const ids = new Set();
-  if (department_id) {
-    try {
-      // Managers sitting in the department (primary column or junction)
-      const r = await query(
-        `SELECT DISTINCT u.id
-         FROM users u
-         WHERE u.is_active = true AND u.deleted_at IS NULL
-           AND u.role IN ('manager', 'team_lead')
-           AND (u.department_id = $1
-                OR EXISTS (SELECT 1 FROM user_department_assignments uda
-                           WHERE uda.user_id = u.id AND uda.department_id = $1))`,
-        [department_id]
-      );
-      for (const row of r.rows) ids.add(row.id);
-    } catch (_e) {}
-  }
-  if (client_id) {
-    try {
-      // Primary team lead on the client
-      const r = await query(`SELECT team_lead_id FROM clients WHERE id = $1`, [client_id]);
-      if (r.rows[0]?.team_lead_id) ids.add(r.rows[0].team_lead_id);
-      // Any user currently tagged to this client with leadership role
-      const r2 = await query(
-        `SELECT DISTINCT u.id
-         FROM users u
-         WHERE u.is_active = true AND u.deleted_at IS NULL
-           AND u.role IN ('manager', 'team_lead')
-           AND u.client_id = $1`,
-        [client_id]
-      );
-      for (const row of r2.rows) ids.add(row.id);
-    } catch (_e) {}
-  }
+  if (!userId) return ids;
+  try {
+    const r = await query(
+      `SELECT team_lead_id, manager_id FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (r.rows[0]?.team_lead_id) ids.add(r.rows[0].team_lead_id);
+    if (r.rows[0]?.manager_id) ids.add(r.rows[0].manager_id);
+  } catch (_e) {}
+  try {
+    const r = await query(
+      `SELECT team_lead_id FROM user_team_lead_assignments WHERE user_id = $1`,
+      [userId]
+    );
+    for (const row of r.rows) ids.add(row.team_lead_id);
+  } catch (_e) {}
+  try {
+    const r = await query(
+      `SELECT manager_id FROM user_manager_assignments WHERE user_id = $1`,
+      [userId]
+    );
+    for (const row of r.rows) ids.add(row.manager_id);
+  } catch (_e) {}
   return ids;
 }
 
 async function collectLeadership() {
   const ids = new Set();
   try {
-    // CEO + any admin. If a designation column exists we can tighten this.
+    // CEO + any admin.
     const admins = await query(
       `SELECT id FROM users WHERE role = 'admin' AND is_active = true AND deleted_at IS NULL`
     );
     for (const row of admins.rows) ids.add(row.id);
   } catch (_e) {}
-  // CFO — match by designation if that column exists; otherwise no-op.
-  try {
-    const cfo = await query(
-      `SELECT id FROM users WHERE is_active = true AND deleted_at IS NULL
-         AND (designation ILIKE '%cfo%' OR designation ILIKE '%chief financial%' OR name ILIKE 'gautami%')`
-    );
-    for (const row of cfo.rows) ids.add(row.id);
-  } catch (_e) { /* designation column may not exist */ }
   return ids;
 }
 
@@ -88,11 +74,12 @@ async function fireUserChangeAlert(userId, kind, fromSide, toSide, actorName, cu
     const subject = await resolveNameClientDept(userId);
     if (!subject) return;
 
-    const fromRecipients = await collectSideRecipients(fromSide || {});
-    const toRecipients = await collectSideRecipients(toSide || {});
+    // Scope: subject + their direct team lead + manager + CEO (admins).
+    // Per product owner: do not broadcast to every manager/TL of the
+    // FROM/TO department or client.
+    const supervisors = await collectSubjectSupervisors(userId);
     const leadership = await collectLeadership();
-    const recipients = new Set([...fromRecipients, ...toRecipients, ...leadership]);
-    recipients.delete(userId); // never alert the subject about themselves
+    const recipients = new Set([userId, ...supervisors, ...leadership]);
 
     let msg;
     if (customMessage) {

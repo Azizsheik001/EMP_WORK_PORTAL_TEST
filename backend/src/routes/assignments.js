@@ -10,6 +10,11 @@ const router = Router();
 router.get('/by-client/:clientId', authenticate, async (req, res, next) => {
   try {
     const { clientId } = req.params;
+    // Junction-priority: include users whose junction rows contain this
+    // client. Then ALSO include users who have NO junction rows but whose
+    // legacy primary client_id matches. Users with junction rows pointing
+    // elsewhere are excluded — their stale primary should not leak them
+    // onto this client's roster.
     const byAssignments = [];
     try {
       const r = await query(
@@ -24,12 +29,31 @@ router.get('/by-client/:clientId', authenticate, async (req, res, next) => {
     } catch (e) {
       if (e.code !== '42P01') throw e;
     }
-    const byPrimaryClient = await query(
-      `SELECT u.id, u.name, u.role, u.email, u.department_id, d.name AS department_name
-       FROM users u LEFT JOIN departments d ON d.id = u.department_id
-       WHERE u.client_id = $1 AND u.deleted_at IS NULL`,
-      [clientId]
-    );
+    let byPrimaryClient;
+    try {
+      byPrimaryClient = await query(
+        `SELECT u.id, u.name, u.role, u.email, u.department_id, d.name AS department_name
+         FROM users u
+         LEFT JOIN departments d ON d.id = u.department_id
+         WHERE u.client_id = $1 AND u.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM user_client_assignments uca
+             WHERE uca.user_id = u.id
+           )`,
+        [clientId]
+      );
+    } catch (e) {
+      if (e.code === '42P01') {
+        // junction table missing — fall back to primary-only
+        byPrimaryClient = await query(
+          `SELECT u.id, u.name, u.role, u.email, u.department_id, d.name AS department_name
+           FROM users u
+           LEFT JOIN departments d ON d.id = u.department_id
+           WHERE u.client_id = $1 AND u.deleted_at IS NULL`,
+          [clientId]
+        );
+      } else throw e;
+    }
     const seen = new Set(byAssignments.map((u) => u.id));
     for (const u of byPrimaryClient.rows) {
       if (!seen.has(u.id)) {

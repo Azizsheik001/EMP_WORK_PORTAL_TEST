@@ -95,21 +95,46 @@ function toDateStr(d) {
     if (e5.code !== '42P07') console.warn('admin_alerts table creation skipped:', e5.message);
   }
 
-  // Dedup table so we don't re-alert about the same expiry window every cycle.
+  // Dedup table — one row per (scope, entity, end_date, notified_on day) so
+  // the alert fires AT MOST once per calendar day per subject. The same
+  // schedule can re-alert daily until it is extended past the horizon (which
+  // changes end_date and resets the dedup naturally).
   try {
     await query(`
       CREATE TABLE IF NOT EXISTS schedule_expiry_alerts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        scope VARCHAR(20) NOT NULL,           -- 'client' | 'user'
+        scope VARCHAR(20) NOT NULL,           -- 'client' | 'user' | 'department'
         entity_id UUID NOT NULL,
         end_date DATE NOT NULL,
+        notified_on DATE NOT NULL DEFAULT CURRENT_DATE,
         created_at TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE (scope, entity_id, end_date)
+        UNIQUE (scope, entity_id, end_date, notified_on)
       )
     `);
   } catch (e6) {
     if (e6.code !== '42P07') console.warn('schedule_expiry_alerts table creation skipped:', e6.message);
   }
+  // Backward-compatible migration for existing installs that still have the
+  // old (scope, entity_id, end_date) UNIQUE constraint without notified_on.
+  try { await query(`ALTER TABLE schedule_expiry_alerts ADD COLUMN IF NOT EXISTS notified_on DATE NOT NULL DEFAULT CURRENT_DATE`); } catch (_e) {}
+  try {
+    // Drop the old 3-column UNIQUE if present and re-create with notified_on.
+    await query(`ALTER TABLE schedule_expiry_alerts DROP CONSTRAINT IF EXISTS schedule_expiry_alerts_scope_entity_id_end_date_key`);
+  } catch (_e) {}
+  try {
+    await query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'schedule_expiry_alerts_daily_uniq'
+        ) THEN
+          ALTER TABLE schedule_expiry_alerts
+            ADD CONSTRAINT schedule_expiry_alerts_daily_uniq
+            UNIQUE (scope, entity_id, end_date, notified_on);
+        END IF;
+      END $$
+    `);
+  } catch (_e) {}
 
   // Kick off the first expiry scan shortly after boot, then every 6h.
   setTimeout(() => { checkScheduleExpiry().catch((e) => console.warn('scheduleExpiry error:', e.message)); }, 15_000);
@@ -117,75 +142,62 @@ function toDateStr(d) {
 })();
 
 // ── Schedule expiry notifier ─────────────────────────────────────
-// Alerts team leads, managers, CEO and Shiva when a client's or a single
-// user's uploaded schedule runs out in the next SCHEDULE_EXPIRY_HORIZON_DAYS.
-const SCHEDULE_EXPIRY_HORIZON_DAYS = 14;
+// Alerts the affected employee, their direct team lead and manager, plus the
+// CEO (admin) when a client's, department's, or a single user's uploaded
+// schedule runs out in the next SCHEDULE_EXPIRY_HORIZON_DAYS. Re-fires daily
+// until the schedule is extended past the horizon.
+const SCHEDULE_EXPIRY_HORIZON_DAYS = 7;
 
-async function collectScheduleRecipients({ clientId, userId, departmentId }) {
+// Narrow recipient list per product owner: subject + their direct supervisors
+// (primary + junction) + admins (CEO). For a team-level alert (client or
+// department scope) we union the supervisors of every member of the cohort
+// instead of every leadership-role user tagged to the client/department.
+async function collectScheduleRecipients({ clientId, userId, departmentId, memberIds = [] }) {
   const ids = new Set();
 
-  // Client-scoped team leads: primary TL on the client, plus users tagged
-  // to the client with a leadership role.
+  // Subject(s) themselves — so the affected person sees it too.
+  if (userId) ids.add(userId);
+  for (const m of memberIds) ids.add(m);
+
+  // Direct supervisors of each subject — primary + junction tables.
+  const subjectIds = userId ? [userId, ...memberIds] : [...memberIds];
+  for (const sid of subjectIds) {
+    try {
+      const r = await query(`SELECT team_lead_id, manager_id FROM users WHERE id = $1`, [sid]);
+      if (r.rows[0]?.team_lead_id) ids.add(r.rows[0].team_lead_id);
+      if (r.rows[0]?.manager_id) ids.add(r.rows[0].manager_id);
+    } catch (_e) {}
+    try {
+      const j = await query(
+        `SELECT team_lead_id FROM user_team_lead_assignments WHERE user_id = $1`,
+        [sid]
+      );
+      for (const row of j.rows) ids.add(row.team_lead_id);
+    } catch (_e) {}
+    try {
+      const j = await query(
+        `SELECT manager_id FROM user_manager_assignments WHERE user_id = $1`,
+        [sid]
+      );
+      for (const row of j.rows) ids.add(row.manager_id);
+    } catch (_e) {}
+  }
+
+  // Primary team lead on the client (the contact recorded on the clients
+  // row) — keep this one client-scoped link so a client lead is still
+  // looped in for client-scope alerts even if individual members have
+  // different reporting lines.
   if (clientId) {
     try {
       const r = await query(`SELECT team_lead_id FROM clients WHERE id = $1`, [clientId]);
       if (r.rows[0]?.team_lead_id) ids.add(r.rows[0].team_lead_id);
-      const r2 = await query(
-        `SELECT id FROM users
-         WHERE is_active = true AND deleted_at IS NULL
-           AND role IN ('team_lead', 'manager')
-           AND client_id = $1`,
-        [clientId]
-      );
-      for (const row of r2.rows) ids.add(row.id);
     } catch (_e) {}
   }
 
-  // Department managers / TLs (primary department column OR junction).
-  if (departmentId) {
-    try {
-      const r = await query(
-        `SELECT DISTINCT u.id
-         FROM users u
-         WHERE u.is_active = true AND u.deleted_at IS NULL
-           AND u.role IN ('manager', 'team_lead')
-           AND (u.department_id = $1
-                OR EXISTS (SELECT 1 FROM user_department_assignments uda
-                           WHERE uda.user_id = u.id AND uda.department_id = $1))`,
-        [departmentId]
-      );
-      for (const row of r.rows) ids.add(row.id);
-    } catch (_e) {}
-  }
-
-  // User-scoped supervisors — direct TL + manager (primary + junction)
-  if (userId) {
-    try {
-      const r = await query(`SELECT team_lead_id, manager_id FROM users WHERE id = $1`, [userId]);
-      if (r.rows[0]?.team_lead_id) ids.add(r.rows[0].team_lead_id);
-      if (r.rows[0]?.manager_id) ids.add(r.rows[0].manager_id);
-      try {
-        const j = await query(
-          `SELECT team_lead_id FROM user_team_lead_assignments WHERE user_id = $1`,
-          [userId]
-        );
-        for (const row of j.rows) ids.add(row.team_lead_id);
-      } catch (_e) {}
-      try {
-        const j = await query(
-          `SELECT manager_id FROM user_manager_assignments WHERE user_id = $1`,
-          [userId]
-        );
-        for (const row of j.rows) ids.add(row.manager_id);
-      } catch (_e) {}
-    } catch (_e) {}
-  }
-
-  // Always: every admin (covers CEO) + Shree + Shiva.
+  // CEO (admins).
   try {
     const admins = await query(
-      `SELECT id FROM users WHERE is_active = true AND deleted_at IS NULL
-         AND (role = 'admin' OR name ILIKE '%shree%' OR name ILIKE '%shiva%')`
+      `SELECT id FROM users WHERE role = 'admin' AND is_active = true AND deleted_at IS NULL`
     );
     for (const row of admins.rows) ids.add(row.id);
   } catch (_e) {}
@@ -193,21 +205,25 @@ async function collectScheduleRecipients({ clientId, userId, departmentId }) {
   return ids;
 }
 
-async function fireScheduleExpiryAlert({ scope, entityId, subjectName, endDate, clientId, departmentId, userId, membersText }) {
-  // Dedup on (scope, entityId, endDate) — UNIQUE constraint raises 23505 on repeat.
+async function fireScheduleExpiryAlert({ scope, entityId, subjectName, endDate, clientId, departmentId, userId, membersText, memberIds = [] }) {
+  // Dedup on (scope, entityId, endDate, today) — alerts re-fire daily until
+  // the schedule is extended past the horizon. The reconcile pass in
+  // checkScheduleExpiry marks already-fired alerts as read for the previous
+  // days, so the bell only counts today's reminder.
   try {
     const inserted = await query(
-      `INSERT INTO schedule_expiry_alerts (scope, entity_id, end_date) VALUES ($1, $2, $3)
-       ON CONFLICT (scope, entity_id, end_date) DO NOTHING RETURNING id`,
+      `INSERT INTO schedule_expiry_alerts (scope, entity_id, end_date, notified_on)
+       VALUES ($1, $2, $3, CURRENT_DATE)
+       ON CONFLICT (scope, entity_id, end_date, notified_on) DO NOTHING RETURNING id`,
       [scope, entityId, endDate]
     );
-    if (inserted.rowCount === 0) return; // already alerted for this end_date
+    if (inserted.rowCount === 0) return; // already alerted today for this end_date
   } catch (e) {
     console.warn('schedule_expiry dedup insert failed:', e.message);
     return;
   }
 
-  const recipients = await collectScheduleRecipients({ clientId, userId, departmentId });
+  const recipients = await collectScheduleRecipients({ clientId, userId, departmentId, memberIds });
   if (recipients.size === 0) return;
 
   // Ensure recipient column exists on admin_alerts (backward-compatible).
@@ -239,6 +255,20 @@ async function fireScheduleExpiryAlert({ scope, entityId, subjectName, endDate, 
     } catch { return null; }
   })());
   if (!anchorUserId) return;
+
+  // Before inserting today's reminder, mark any previous unread alerts for
+  // the SAME subject (same scope + entityId) as read. This way the bell only
+  // shows today's pending reminder rather than stacking yesterday's + today's.
+  try {
+    await query(
+      `UPDATE admin_alerts SET is_read = true
+       WHERE alert_type = 'schedule_expiring'
+         AND is_read = false
+         AND details->>'scope' = $1
+         AND details->>'entityId' = $2`,
+      [scope, String(entityId)]
+    );
+  } catch (_e) { /* best-effort */ }
 
   for (const recipientId of recipients) {
     try {
@@ -334,8 +364,27 @@ async function checkScheduleExpiry() {
       if (readIds.length > 0) {
         const ph = readIds.map((_, i) => `$${i + 1}`).join(', ');
         await query(`UPDATE admin_alerts SET is_read = true WHERE id IN (${ph})`, readIds);
-        // Also drop dedup rows so a future expiry (after the extension runs out) can legitimately re-fire.
-        await query(`DELETE FROM schedule_expiry_alerts`); // simplest: blow away the whole dedup set since the scan below repopulates it
+        // Drop dedup rows ONLY for entities that are no longer expiring. With
+        // daily dedup we can't blow away the whole table — that would let
+        // entities still inside the horizon re-fire a duplicate alert today.
+        const reconciledKeys = new Set();
+        for (const row of stale.rows) {
+          if (!readIds.includes(row.id)) continue;
+          let details = {};
+          try { details = typeof row.details === 'string' ? JSON.parse(row.details) : (row.details || {}); } catch {}
+          if (details.scope && (details.entityId || row.user_id)) {
+            reconciledKeys.add(`${details.scope}:${details.entityId || row.user_id}`);
+          }
+        }
+        for (const key of reconciledKeys) {
+          const [scope, entityId] = key.split(':');
+          try {
+            await query(
+              `DELETE FROM schedule_expiry_alerts WHERE scope = $1 AND entity_id = $2`,
+              [scope, entityId]
+            );
+          } catch (_e) {}
+        }
         console.log(`schedule-expiry: reconciled ${readIds.length} stale alert(s) — schedule now extends beyond the horizon`);
       }
     }
@@ -417,6 +466,10 @@ async function checkScheduleExpiry() {
         clientId: team.clientId,
         departmentId: team.deptId,
         membersText: `${majority.length} member${majority.length === 1 ? '' : 's'}: ${sampleNames}${extra}`,
+        // Pass the cohort so each member + their direct TL/manager are
+        // notified (instead of broadcasting to every leadership user
+        // tagged to the client/department).
+        memberIds: majority.map((m) => m.id),
       });
     } else {
       // Solo: single person, just fire one alert for them.
@@ -1127,6 +1180,50 @@ router.get('/grid', authenticate, async (req, res, next) => {
     const clientId = req.query.client_id || null;
     const departmentId = req.query.department_id || null;
     if (!from || !to || from > to) return res.status(400).json({ error: 'Query from and to (YYYY-MM-DD) required, from <= to' });
+    // ALWAYS filter shift rows to exclude those tagged to a client the user
+    // is no longer assigned to. Without this:
+    //   * client filter alone catches the explicit case (Keerthi → Cleanleaf)
+    //   * BUT department / "All clients" filters still pull stale client-tagged
+    //     shifts. The result is two parallel rows per (user, date) — one for
+    //     the legacy client and one for the current internal/department shift
+    //     — and JS overwrites whichever is iterated second, producing a
+    //     frankenstein pattern in the grid.
+    //
+    // Rule: a shift_assignments row is visible when EITHER
+    //   (a) sa.client_id IS NULL (internal / department-level), OR
+    //   (b) the user is currently assigned to sa.client_id via
+    //       user_client_assignments (junction-priority — only fall back to
+    //       users.client_id when the junction is empty for that user).
+    const stillAssignedToShiftClient = `
+      AND (
+        sa.client_id IS NULL
+        OR (
+          CASE
+            WHEN EXISTS (SELECT 1 FROM user_client_assignments uca0 WHERE uca0.user_id = u.id)
+            THEN EXISTS (
+              SELECT 1 FROM user_client_assignments uca
+              WHERE uca.user_id = u.id AND uca.client_id = sa.client_id
+            )
+            ELSE u.client_id = sa.client_id
+          END
+        )
+      )
+    `;
+    // The explicit-client filter is still useful (it lets the same user query
+    // be scoped to one client even if they're on multiple), so we keep that
+    // narrowing on top of the always-on staleness filter.
+    const currentAssignmentClause = clientId
+      ? `AND (
+           CASE
+             WHEN EXISTS (SELECT 1 FROM user_client_assignments uca0 WHERE uca0.user_id = u.id)
+             THEN EXISTS (
+               SELECT 1 FROM user_client_assignments uca
+               WHERE uca.user_id = u.id AND uca.client_id = $3
+             )
+             ELSE u.client_id = $3
+           END
+         )`
+      : '';
     let r;
     try {
       r = await query(
@@ -1136,6 +1233,8 @@ router.get('/grid', authenticate, async (req, res, next) => {
          JOIN users u ON u.id = sa.user_id AND u.deleted_at IS NULL
          WHERE sa.shift_date >= $1 AND sa.shift_date <= $2
            AND ($3::uuid IS NULL OR sa.client_id = $3)
+           ${stillAssignedToShiftClient}
+           ${currentAssignmentClause}
            AND ($4::uuid IS NULL OR u.department_id = $4 OR u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $4))
          ORDER BY u.name, sa.shift_date`,
         [from, to, clientId, departmentId]
@@ -1149,6 +1248,21 @@ router.get('/grid', authenticate, async (req, res, next) => {
            JOIN users u ON u.id = sa.user_id AND u.deleted_at IS NULL
            WHERE sa.shift_date >= $1 AND sa.shift_date <= $2
              AND ($3::uuid IS NULL OR sa.client_id = $3)
+             ${currentAssignmentClause}
+             AND ($4::uuid IS NULL OR u.department_id = $4 OR u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $4))
+           ORDER BY u.name, sa.shift_date`,
+          [from, to, clientId, departmentId]
+        );
+      } else if (e.code === '42P01' && clientId) {
+        // user_client_assignments table doesn't exist — fall back to the simpler check
+        r = await query(
+          `SELECT sa.user_id, u.name AS employee_name, u.role, sa.shift_date,
+                  sa.shift_start_time, sa.shift_end_time, sa.is_off
+           FROM shift_assignments sa
+           JOIN users u ON u.id = sa.user_id AND u.deleted_at IS NULL
+           WHERE sa.shift_date >= $1 AND sa.shift_date <= $2
+             AND ($3::uuid IS NULL OR sa.client_id = $3)
+             AND ($3::uuid IS NULL OR u.client_id = $3)
              AND ($4::uuid IS NULL OR u.department_id = $4 OR u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $4))
            ORDER BY u.name, sa.shift_date`,
           [from, to, clientId, departmentId]
@@ -1203,15 +1317,32 @@ router.get('/grid', authenticate, async (req, res, next) => {
     // so newly added employees show up in the schedule grid
     if (clientId || departmentId) {
       try {
+        // Junction-priority membership check: if a user has any junction
+        // rows for that relation, only the junction matters; otherwise fall
+        // back to the legacy primary column.
         const conditions = ['u.deleted_at IS NULL', 'u.is_active = true'];
         const vals = [];
         if (clientId) {
           vals.push(clientId);
-          conditions.push(`(u.client_id = $${vals.length} OR u.id IN (SELECT uca.user_id FROM user_client_assignments uca WHERE uca.client_id = $${vals.length}))`);
+          const i = vals.length;
+          conditions.push(`(
+            CASE
+              WHEN EXISTS (SELECT 1 FROM user_client_assignments uca0 WHERE uca0.user_id = u.id)
+              THEN u.id IN (SELECT uca.user_id FROM user_client_assignments uca WHERE uca.client_id = $${i})
+              ELSE u.client_id = $${i}
+            END
+          )`);
         }
         if (departmentId) {
           vals.push(departmentId);
-          conditions.push(`(u.department_id = $${vals.length} OR u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $${vals.length}))`);
+          const i = vals.length;
+          conditions.push(`(
+            CASE
+              WHEN EXISTS (SELECT 1 FROM user_department_assignments uda0 WHERE uda0.user_id = u.id)
+              THEN u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $${i})
+              ELSE u.department_id = $${i}
+            END
+          )`);
         }
         const missingUsers = await query(
           `SELECT u.id, u.name, u.role FROM users u WHERE ${conditions.join(' AND ')} ORDER BY u.name`,
@@ -1279,13 +1410,34 @@ router.post('/bulk', authenticate, requireRole('admin', 'manager', 'team_lead'),
       return res.status(201).json({ ok: true, count: 0 });
     }
 
-    // When saving without a specific client_id, look up each user's client_id from the users table
+    // When saving without a specific client_id, look up the user's current
+    // client. Prefer user_client_assignments (the multi-client junction) so a
+    // user assigned to e.g. Ameresco + Standard Solar gets their shifts saved
+    // under one of the actual current clients — not against a stale primary
+    // users.client_id from a previous assignment. Fall back to users.client_id
+    // only if there is no junction row.
     let userClientMap = {};
     if (!client_id) {
       const userIds = [...new Set(assignments.map((a) => a.user_id))];
       const ph = userIds.map((_, i) => `$${i + 1}`).join(', ');
-      const ucResult = await query(`SELECT id, client_id FROM users WHERE id IN (${ph})`, userIds);
-      ucResult.rows.forEach((r) => { userClientMap[r.id] = r.client_id; });
+      try {
+        const jResult = await query(
+          `SELECT user_id, client_id FROM user_client_assignments WHERE user_id IN (${ph})`,
+          userIds
+        );
+        jResult.rows.forEach((r) => {
+          // First-write-wins: any current assignment beats users.client_id below
+          if (!userClientMap[r.user_id]) userClientMap[r.user_id] = r.client_id;
+        });
+      } catch (e) {
+        if (e.code !== '42P01') throw e; // junction table may not exist
+      }
+      const missing = userIds.filter((id) => !userClientMap[id]);
+      if (missing.length > 0) {
+        const ph2 = missing.map((_, i) => `$${i + 1}`).join(', ');
+        const ucResult = await query(`SELECT id, client_id FROM users WHERE id IN (${ph2})`, missing);
+        ucResult.rows.forEach((r) => { userClientMap[r.id] = r.client_id; });
+      }
     }
     // Separate assignments into those with and without client_id
     const withClient = [];
