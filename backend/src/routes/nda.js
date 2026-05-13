@@ -72,24 +72,31 @@ router.get('/templates/active', async (req, res, next) => {
 });
 
 // GET all templates
-router.get('/templates', async (req, res, next) => {
+router.get(['/templates', '/nda_templates'], async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('nda_templates')
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('Database error fetching templates:', error);
+      throw error;
+    }
 
     const templatesWithUrls = await Promise.all(
       data.map(async (t) => {
         let file_url = null;
-        if (t.pdf_path && t.pdf_path !== 'pending-upload') {
+        // Ensure t.pdf_path is a valid relative path within the bucket
+        if (t.pdf_path && t.pdf_path !== 'pending-upload' && !t.pdf_path.startsWith('http')) {
           try {
             file_url = await createSignedUrl(t.pdf_path, 3600);
           } catch (err) {
-            console.error(`Failed to get signed url for template ${t.id}`, err);
+            console.error(`Failed to get signed url for template ${t.id} at path ${t.pdf_path}:`, err.message);
           }
+        } else if (t.pdf_path && t.pdf_path.startsWith('http')) {
+          // If it's already a full URL, use it directly
+          file_url = t.pdf_path;
         }
         return { ...t, file_url };
       })
@@ -478,7 +485,7 @@ router.post('/send-to-users', async (req, res, next) => {
 });
 
 // Employee pending NDA
-router.get('/me/pending', async (req, res, next) => {
+router.get(['/me/pending', '/pending'], async (req, res, next) => {
   try {
     const email = getUserEmail(req);
 
@@ -495,7 +502,10 @@ router.get('/me/pending', async (req, res, next) => {
       .limit(1)
       .maybeSingle();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Database error fetching pending NDA:', error);
+      throw error;
+    }
 
     res.json({ nda: data || null });
   } catch (e) {
@@ -539,7 +549,7 @@ router.get('/carrie/completed', async (req, res, next) => {
 });
 
 // All completed NDA list
-router.get('/all-completed', async (req, res, next) => {
+router.get(['/all-completed', '/all_completed'], async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('nda_requests')
@@ -547,7 +557,10 @@ router.get('/all-completed', async (req, res, next) => {
       .eq('status', 'completed')
       .order('completed_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('Database error fetching all completed NDAs:', error);
+      throw error;
+    }
 
     res.json({ ndas: data || [] });
   } catch (e) {

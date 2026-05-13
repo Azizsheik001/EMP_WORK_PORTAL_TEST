@@ -10,17 +10,38 @@ if (!supabaseUrl || !serviceRoleKey) {
 
 export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
+/**
+ * Clean path for Supabase storage (no leading slash, no full URL)
+ */
+function cleanPath(path) {
+  if (!path) return '';
+  let cleaned = String(path);
+  // If it's a full URL, try to extract the relative path (last part after bucket)
+  if (cleaned.startsWith('http')) {
+    const parts = cleaned.split(`/${bucket}/`);
+    if (parts.length > 1) cleaned = parts[1];
+    else {
+      // Fallback: just take the part after the last slash if it looks like a Supabase URL
+      const urlParts = cleaned.split('/');
+      cleaned = urlParts[urlParts.length - 1];
+    }
+  }
+  // Remove leading slash
+  return cleaned.replace(/^\/+/, '');
+}
+
 export async function uploadFile(path, buffer, contentType = 'application/pdf') {
+  const safePath = cleanPath(path);
   const { error } = await supabaseAdmin.storage
     .from(bucket)
-    .upload(path, buffer, {
+    .upload(safePath, buffer, {
       contentType,
       upsert: true,
     });
 
   if (error) throw error;
 
-  return path;
+  return safePath;
 }
 
 export async function uploadPdf(path, buffer, contentType = 'application/pdf') {
@@ -28,9 +49,12 @@ export async function uploadPdf(path, buffer, contentType = 'application/pdf') {
 }
 
 export async function createSignedUrl(path, expiresIn = 60 * 10) {
+  const safePath = cleanPath(path);
+  if (!safePath) throw new Error('Invalid path for signed URL');
+
   const { data, error } = await supabaseAdmin.storage
     .from(bucket)
-    .createSignedUrl(path, expiresIn);
+    .createSignedUrl(safePath, expiresIn);
 
   if (error) throw error;
 
@@ -38,9 +62,10 @@ export async function createSignedUrl(path, expiresIn = 60 * 10) {
 }
 
 export async function downloadFile(path) {
+  const safePath = cleanPath(path);
   const { data, error } = await supabaseAdmin.storage
     .from(bucket)
-    .download(path);
+    .download(safePath);
 
   if (error) throw error;
 
