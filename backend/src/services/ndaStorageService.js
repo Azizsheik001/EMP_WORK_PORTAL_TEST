@@ -8,7 +8,9 @@ if (!supabaseUrl || !serviceRoleKey) {
   console.warn('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
 }
 
-export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+export const supabaseAdmin = supabaseUrl && serviceRoleKey 
+  ? createClient(supabaseUrl, serviceRoleKey) 
+  : null;
 
 /**
  * Clean path for Supabase storage (no leading slash, no full URL)
@@ -31,6 +33,8 @@ function cleanPath(path) {
 }
 
 export async function uploadFile(path, buffer, contentType = 'application/pdf') {
+  if (!supabaseAdmin) throw new Error('Supabase Storage is not configured on this server (Missing SUPABASE_URL)');
+  
   const safePath = cleanPath(path);
   const { error } = await supabaseAdmin.storage
     .from(bucket)
@@ -49,6 +53,7 @@ export async function uploadPdf(path, buffer, contentType = 'application/pdf') {
 }
 
 export async function createSignedUrl(path, expiresIn = 60 * 10) {
+  if (!supabaseAdmin) throw new Error('Supabase Storage is not configured.');
   const safePath = cleanPath(path);
   if (!safePath) throw new Error('Invalid path for signed URL');
 
@@ -62,6 +67,7 @@ export async function createSignedUrl(path, expiresIn = 60 * 10) {
 }
 
 export async function downloadFile(path) {
+  if (!supabaseAdmin) throw new Error('Supabase Storage is not configured.');
   const safePath = cleanPath(path);
   const { data, error } = await supabaseAdmin.storage
     .from(bucket)
