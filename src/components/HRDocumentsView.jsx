@@ -178,20 +178,23 @@ export default function HRDocumentsView({ isDark, currentUser, onEditNdaForm }) 
 
       if (hasApi()) {
         try {
-          const { templates } = await api.nda.getAllTemplates();
-          if (templates && templates.length > 0) {
-            const templateDocs = templates.map(t => ({
+          const r = await api.nda.getAllTemplates();
+          if (r && r.templates && r.templates.length > 0) {
+            const templateDocs = r.templates.map(t => ({
               id: t.id,
               title: t.name || 'Document Template',
               description: t.description || 'Interactive document template.',
               category: t.category || 'nda',
-          const r = await api.nda.getTemplates();
-          if (r && r.templates) {
-            const templates = r.templates.map(t => ({
-              ...t,
-              is_template: true
+              visible_to: 'all',
+              show_to_new_users: !!t.show_to_new_users,
+              created_by_name: 'Admin',
+              created_at: t.created_at || new Date().toISOString(),
+              file_data: t.file_url,
+              file_type: 'application/pdf',
+              file_name: `${t.name || 'Template'}.pdf`,
+              is_nda_template: true,
             }));
-            hrDocs = [...hrDocs, ...templates];
+            hrDocs = [...templateDocs, ...hrDocs];
           }
         } catch (e) {
           console.error("Failed to fetch interactive templates", e);
