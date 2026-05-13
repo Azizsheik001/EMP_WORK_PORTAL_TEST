@@ -5,11 +5,14 @@
 
 const getBaseUrl = () => {
   if (import.meta.env.DEV) return '';
-  return (import.meta.env.VITE_API_URL || '').trim().replace(/\\n/g, '').replace(/\s+/g, '').replace(/\/$/, '');
+  const envUrl = (import.meta.env.VITE_API_URL || '').trim();
+  // If VITE_API_URL is literally "/api", return empty string to avoid double /api/api
+  if (envUrl === '/api') return '';
+  return envUrl.replace(/\\n/g, '').replace(/\s+/g, '').replace(/\/$/, '');
 };
 
 export function hasApi() {
-  return import.meta.env.DEV || !!import.meta.env.VITE_API_URL?.trim();
+  return true; // Assume API is available at /api if not specified
 }
 
 export function getToken() {
