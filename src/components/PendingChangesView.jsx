@@ -8,7 +8,7 @@ export default function PendingChangesView({ isDark, currentUser }) {
   const fetchPending = async () => {
     if (!hasApi()) return setLoading(false);
     try {
-      const res = await fetch(`${api.client.defaults.baseURL || 'http://localhost:3000'}/api/pending-changes`, {
+      const res = await fetch('/api/pending-changes', {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       if (res.ok) {
@@ -28,7 +28,7 @@ export default function PendingChangesView({ isDark, currentUser }) {
 
   const handleApprove = async (id) => {
     try {
-      const res = await fetch(`${api.client.defaults.baseURL || 'http://localhost:3000'}/api/pending-changes/${id}/approve`, {
+      const res = await fetch(`/api/pending-changes/${id}/approve`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
@@ -45,7 +45,7 @@ export default function PendingChangesView({ isDark, currentUser }) {
 
   const handleReject = async (id) => {
     try {
-      const res = await fetch(`${api.client.defaults.baseURL || 'http://localhost:3000'}/api/pending-changes/${id}/reject`, {
+      const res = await fetch(`/api/pending-changes/${id}/reject`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
