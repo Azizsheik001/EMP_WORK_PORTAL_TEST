@@ -185,16 +185,13 @@ export default function HRDocumentsView({ isDark, currentUser, onEditNdaForm }) 
               title: t.name || 'Document Template',
               description: t.description || 'Interactive document template.',
               category: t.category || 'nda',
-              visible_to: 'all',
-              show_to_new_users: !!t.show_to_new_users,
-              created_by_name: 'Admin',
-              created_at: t.created_at || new Date().toISOString(),
-              file_data: t.file_url,
-              file_type: 'application/pdf',
-              file_name: `${t.name || 'Template'}.pdf`,
-              is_nda_template: true,
+          const r = await api.nda.getTemplates();
+          if (r && r.templates) {
+            const templates = r.templates.map(t => ({
+              ...t,
+              is_template: true
             }));
-            hrDocs = [...templateDocs, ...hrDocs];
+            hrDocs = [...hrDocs, ...templates];
           }
         } catch (e) {
           console.error("Failed to fetch interactive templates", e);
@@ -204,22 +201,25 @@ export default function HRDocumentsView({ isDark, currentUser, onEditNdaForm }) 
           const r = canEdit
             ? await api.nda.getAllCompleted()
             : await api.nda.getEmployeeDocuments(currentUser.id);
-          const completedNdas = (r.ndas || []).filter(n => n.status === 'completed' && n.final_pdf_path);
-          const completedDocs = completedNdas.map(n => ({
-            id: 'completed_nda_' + n.id,
-            title: `Signed Document - ${n.employee_name}`,
-            description: 'Fully executed and signed document.',
-            category: 'nda',
-            visible_to: 'all',
-            show_to_new_users: false,
-            created_by_name: 'System',
-            created_at: n.completed_at || n.created_at,
-            file_type: 'application/pdf',
-            file_name: `Signed_${n.employee_name.replace(/\s+/g, '_')}.pdf`,
-            is_signed_nda: true,
-            nda_id: n.id
-          }));
-          hrDocs = [...hrDocs, ...completedDocs];
+          
+          if (r && r.ndas) {
+            const completedNdas = r.ndas.filter(n => n.status === 'completed' && n.final_pdf_path);
+            const completedDocs = completedNdas.map(n => ({
+              id: 'completed_nda_' + n.id,
+              title: `Signed Document - ${n.employee_name}`,
+              description: 'Fully executed and signed document.',
+              category: 'nda',
+              visible_to: 'all',
+              show_to_new_users: false,
+              created_by_name: 'System',
+              created_at: n.completed_at || n.created_at,
+              file_type: 'application/pdf',
+              file_name: `Signed_${n.employee_name.replace(/\s+/g, '_')}.pdf`,
+              is_signed_nda: true,
+              nda_id: n.id
+            }));
+            hrDocs = [...hrDocs, ...completedDocs];
+          }
         } catch (e) {
           console.error("Failed to fetch completed NDAs", e);
         }
