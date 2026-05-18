@@ -339,18 +339,43 @@ export default function DashboardView({
   const firstName = currentUser?.name?.split(' ')[0] || 'there';
   const canApprove = userType === 'team_lead' || userType === 'manager' || userType === 'admin';
 
-  // ── Team-scoped users: TL sees own department, employee via myTeam, admin/manager sees all ──
+  // ── Team-scoped users ──
+  // Dashboard metrics show only direct team: same-department members + team lead + managers.
+  // The backend /my-team returns a broader set (by client, dept, TL, manager chains),
+  // so we filter on the frontend to match what's relevant for dashboard metrics.
   const teamUsers = useMemo(() => {
     if (!allUsers || allUsers.length === 0) return [];
-    if (userType === 'admin' || userType === 'manager') return allUsers;
-    if (userType === 'team_lead') {
-      const deptId = currentUser?.department_id;
-      if (deptId) return allUsers.filter(u => u.department_id === deptId || u.id === currentUser.id);
-      // Fallback: show users assigned to this team lead
-      return allUsers.filter(u => u.team_lead_id === currentUser.id || u.id === currentUser.id);
-    }
-    return allUsers; // employee — already filtered by myTeam API
-  }, [allUsers, userType, currentUser?.department_id, currentUser?.id]);
+    if (userType === 'admin') return allUsers;
+
+    const deptId = currentUser?.department_id;
+    const myDeptIds = new Set(currentUser?.department_ids || []);
+    if (deptId) myDeptIds.add(deptId);
+
+    const tlId = currentUser?.team_lead_id;
+    const mgrId = currentUser?.manager_id;
+
+    return allUsers.filter(u => {
+      // Always include self
+      if (u.id === currentUser.id) return true;
+      
+      // Same department (check primary and multi)
+      const uDeptIds = new Set(u.department_ids || []);
+      if (u.department_id) uDeptIds.add(u.department_id);
+      
+      const sharesDepartment = Array.from(myDeptIds).some(id => uDeptIds.has(id));
+      if (sharesDepartment) return true;
+
+      // Direct team lead (even if in a different department)
+      if (tlId && u.id === tlId) return true;
+      // Direct manager (even if in a different department)
+      if (mgrId && u.id === mgrId) return true;
+      // For team leads: include employees assigned to them
+      if (userType === 'team_lead' && (u.team_lead_id === currentUser.id || (u.team_lead_ids && u.team_lead_ids.includes(currentUser.id)))) return true;
+      // For managers: include employees assigned to them
+      if (userType === 'manager' && (u.manager_id === currentUser.id || u.team_lead_id === currentUser.id || (u.manager_ids && u.manager_ids.includes(currentUser.id)))) return true;
+      return false;
+    });
+  }, [allUsers, userType, currentUser]);
 
   const teamUserIdSet = useMemo(() => new Set(teamUsers.map(u => u.id)), [teamUsers]);
 
@@ -358,8 +383,8 @@ export default function DashboardView({
   const statsSource = useMemo(() => {
     const src = allLeaveRequests && allLeaveRequests.length > 0 ? allLeaveRequests : leaveRequests;
     if (!src || !Array.isArray(src)) return [];
-    if (userType === 'admin' || userType === 'manager') return src;
-    // For team_lead and employee, filter leave requests to team members only
+    if (userType === 'admin') return src;
+    // For manager, team_lead and employee, filter leave requests to team members only
     return src.filter(r => {
       const eid = r.employeeId || r.employee_id;
       return teamUserIdSet.has(eid);
@@ -426,6 +451,7 @@ export default function DashboardView({
 
   const timeRemainingStr = useMemo(() => {
     if (!isClockedIn || !myShiftToday || !myShiftToday.shift_end_time || !myShiftToday.shift_start_time) return null;
+    if (myShiftToday.is_off || String(myShiftToday.shift_end_time).toUpperCase() === 'OFF' || String(myShiftToday.shift_start_time).toUpperCase() === 'OFF') return null;
     const tz = currentUser?.work_timezone || 'Asia/Kolkata';
     
     const [ehStr, emStr] = myShiftToday.shift_end_time.split(':');
@@ -477,7 +503,7 @@ export default function DashboardView({
   const [expandedCard, setExpandedCard] = useState(null);
 
   // ── Today's Attendance from shifts ────────────────────────────
-  const shouldFilterShifts = userType === 'employee' || userType === 'team_lead';
+  const shouldFilterShifts = userType === 'employee' || userType === 'team_lead' || userType === 'manager';
 
   // Set of admin user IDs to exclude from attendance rollups (CEO, etc. should never show as "absent")
   const adminIdSet = useMemo(() => {
@@ -502,7 +528,12 @@ export default function DashboardView({
   }, [statsSource, actualToday]);
 
   const todayRows = useMemo(() => {
-    let rows = buildShiftRowsFromApi(todayShifts, { today, adminIds: adminIdSet });
+    const shiftsWithTz = todayShifts.map(s => {
+      const uId = s.user_id || s.employeeId || s.employee_id;
+      const user = allUsers?.find(u => u.id === uId);
+      return { ...s, work_timezone: s.work_timezone || user?.work_timezone };
+    });
+    let rows = buildShiftRowsFromApi(shiftsWithTz, { today, adminIds: adminIdSet });
     // Always exclude admins from attendance rollups — they're not counted in team totals either
     if (adminIdSet.size > 0) rows = rows.filter((r) => !adminIdSet.has(r.employeeId));
     // For employees and team leads, only show their team members
@@ -521,23 +552,24 @@ export default function DashboardView({
   const attendanceCounts = useMemo(() => {
     let loggedIn = 0;
     let completed = 0;
-    let notLoggedIn = 0;
+    let notStarted = 0;
     let absent = 0;
     let off = 0;
     let leave = 0;
     todayRows.forEach((r) => {
       if (r.status === 'current_logged_in') loggedIn++;
       else if (r.status === 'completed') completed++;
-      else if (r.status === 'current_not_logged_in' || r.status === 'not_started') notLoggedIn++;
+      else if (r.status === 'not_started' || r.status === 'current_not_logged_in') notStarted++;
       else if (r.status === 'absent') absent++;
       else if (r.status === 'leave') leave++;
       else off++;
     });
     const totalTeam = typeof teamSize === 'number' ? teamSize : todayRows.length;
-    const accounted = loggedIn + completed + notLoggedIn + absent + leave + off;
+    const accounted = loggedIn + completed + notStarted + absent + leave + off;
     const unaccounted = Math.max(0, totalTeam - accounted);
-    off += unaccounted;
-    return { loggedIn, completed, notLoggedIn, absent, leave, off, total: totalTeam };
+    // Unaccounted team members (no shift row) treated as absent, not off
+    absent += unaccounted;
+    return { loggedIn, completed, notLoggedIn: notStarted, absent, leave, off, total: totalTeam };
   }, [todayRows, teamSize]);
 
   // ── Employee lists per category (for card drill-down) ──────────
@@ -551,10 +583,20 @@ export default function DashboardView({
       .map((r) => ({ name: r.employeeName, detail: r.loginTime !== '—' ? `In: ${r.loginTime}` : '', extra: r.shiftTime })),
     [todayRows]);
 
-  const absentList = useMemo(() =>
-    todayRows.filter((r) => r.status === 'absent')
-      .map((r) => ({ name: r.employeeName, detail: r.shiftTime, extra: 'No clock-in' })),
-    [todayRows]);
+  const absentList = useMemo(() => {
+    // Include only absent
+    const fromShifts = todayRows
+      .filter((r) => r.status === 'absent')
+      .map((r) => ({ name: r.employeeName, detail: r.shiftTime, extra: 'No clock-in' }));
+
+    // Also include unaccounted team members (those with no shift row and not on leave)
+    const shiftUserIds = new Set(todayRows.map(r => r.employeeId));
+    const unaccountedMembers = (teamUsers || [])
+      .filter(u => u.role !== 'admin' && u.is_active !== false && !shiftUserIds.has(u.id) && !onLeaveIds.has(u.id))
+      .map(u => ({ name: u.name, detail: u.designation || '', extra: 'No schedule / No clock-in' }));
+
+    return [...fromShifts, ...unaccountedMembers];
+  }, [todayRows, teamUsers, onLeaveIds]);
 
   // ── On leave today (deduplicated by employee, excludes those who clocked in) ──
   const onLeaveTodayList = useMemo(() => {
@@ -893,7 +935,7 @@ export default function DashboardView({
       </div>
 
       {/* ── Row 2: Attendance Donut + Department Donut + Clock Status ──── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {/* Attendance Donut */}
         <div className={`rounded-xl border p-5 ${card}`}>
           <h2 className={`text-[10px] font-semibold uppercase tracking-wider ${subtleText} mb-4`}>Today's Attendance</h2>

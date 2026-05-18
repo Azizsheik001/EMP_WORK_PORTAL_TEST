@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api, hasApi } from '../api/client';
+import EmployeeDataEditModal from './EmployeeDataEditModal';
 
 function fmt(name) {
   if (!name) return '';
@@ -44,8 +45,9 @@ export default function EmployeeDataView({ isDark, currentUser }) {
   const [shifts, setShifts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingUsers, setLoadingUsers] = useState(true);
+  const [isEditing, setIsEditing] = useState(false);
 
-  const isAdmin = currentUser?.type === 'admin' || currentUser?.role === 'admin';
+  const isAdmin = currentUser?.type === 'admin' || currentUser?.role === 'admin' || currentUser?.role === 'manager';
 
   // Fetch user list
   useEffect(() => {
@@ -105,7 +107,7 @@ export default function EmployeeDataView({ isDark, currentUser }) {
   const offDays = shifts.filter(s => s.is_off).length;
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="space-y-6 w-full h-full flex flex-col">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
@@ -169,6 +171,15 @@ export default function EmployeeDataView({ isDark, currentUser }) {
                     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
                       Inactive
                     </span>
+                  )}
+                  {isAdmin && (
+                    <button 
+                      onClick={() => setIsEditing(true)}
+                      className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                      Edit Data
+                    </button>
                   )}
                 </div>
                 <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{profile.email}</p>
@@ -315,7 +326,14 @@ export default function EmployeeDataView({ isDark, currentUser }) {
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDark ? 'divide-slate-700' : 'divide-gray-100'}`}>
-                    {[...shifts].sort((a,b) => b.shift_date.localeCompare(a.shift_date)).slice(0, 15).map(s => {
+                    {[...shifts]
+                      .filter(s => {
+                        const thirtyDaysAgo = new Date();
+                        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                        return s.shift_date >= thirtyDaysAgo.toISOString().slice(0, 10);
+                      })
+                      .sort((a,b) => b.shift_date.localeCompare(a.shift_date))
+                      .map(s => {
                       const fmtTime = ts => ts ? new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : '—';
                       const status = s.is_off ? 'Off' : s.clock_in_at && s.clock_out_at ? 'Done' : s.clock_in_at ? 'Active' : s.shift_date < today ? 'Absent' : 'Scheduled';
                       const statusColor = {
@@ -325,9 +343,13 @@ export default function EmployeeDataView({ isDark, currentUser }) {
                         Absent: 'text-red-600 dark:text-red-400',
                         Scheduled: 'text-amber-600 dark:text-amber-400',
                       }[status];
+                      
+                      const [y, m, d] = s.shift_date.split('-');
+                      const displayDate = `${m}-${d}-${y.slice(2)}`;
+
                       return (
                         <tr key={s.id || s.shift_date} className={`${isDark ? 'hover:bg-slate-700/30' : 'hover:bg-gray-50'}`}>
-                          <td className="px-3 py-2 font-medium">{s.shift_date}</td>
+                          <td className="px-3 py-2 font-medium">{displayDate}</td>
                           <td className="px-3 py-2 text-gray-500 dark:text-gray-400">
                             {s.shift_start_time && s.shift_end_time ? `${s.shift_start_time?.slice(0,5)} – ${s.shift_end_time?.slice(0,5)}` : '—'}
                           </td>
@@ -360,6 +382,21 @@ export default function EmployeeDataView({ isDark, currentUser }) {
           <p className={`text-base font-medium ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Select an employee to view their full profile</p>
           <p className={`text-sm mt-1 ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>Leave balances, assets, shift history and more</p>
         </div>
+      )}
+
+      {isEditing && profile && (
+        <EmployeeDataEditModal 
+          profile={profile}
+          balance={balance}
+          assets={assets}
+          users={users}
+          isDark={isDark}
+          onClose={() => setIsEditing(false)}
+          onSaved={() => {
+            setIsEditing(false);
+            loadProfile(selectedId);
+          }}
+        />
       )}
     </div>
   );

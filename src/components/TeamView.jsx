@@ -382,7 +382,7 @@ function MyTeamView({ isDark, currentUser, allUsers, shiftRows, leaveRequests })
   const hasMultipleDepts = deptGroups.length > 1;
 
   return (
-    <div className="space-y-5 max-w-3xl mx-auto w-full">
+    <div className="space-y-5 w-full max-w-7xl mx-auto pb-6">
       <div>
         <h1 className={`text-xl font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{hasMultipleDepts ? 'My Teams' : (deptGroups[0]?.name || 'My Team')}</h1>
         <p className={`text-sm mt-0.5 ${subtleText}`}>{sortedTeammates.length} teammate{sortedTeammates.length !== 1 ? 's' : ''}{hasMultipleDepts ? ` across ${deptGroups.length} departments` : ''}</p>

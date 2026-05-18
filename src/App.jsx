@@ -266,6 +266,8 @@ export default function App() {
   const [myNotificationsOpen, setMyNotificationsOpen] = useState(false);
   const [leaveRequests, setLeaveRequests] = useState([]);
   const [allLeaveRequests, setAllLeaveRequests] = useState([]);
+  const [compOffRequests, setCompOffRequests] = useState([]);
+  const [allCompOffRequests, setAllCompOffRequests] = useState([]);
   const [apiClients, setApiClients] = useState([]);
   const [apiShifts, setApiShifts] = useState([]);
   const [departments, setDepartments] = useState([]);
@@ -362,6 +364,17 @@ export default function App() {
     }
   }, []);
 
+  const fetchCompOffRequests = useCallback(async () => {
+    if (!hasApi() || !getToken()) return;
+    try {
+      const data = await api.holidays.compOffRequests();
+      setCompOffRequests((data.requests || []).filter(r => r.status === 'pending'));
+      setAllCompOffRequests(data.requests || []);
+    } catch (e) {
+      // comp_off_requests table may not exist yet
+    }
+  }, []);
+
   useEffect(() => {
     if (!hasApi() || !getToken()) return;
     const stored = getStoredUser();
@@ -428,6 +441,7 @@ export default function App() {
     }
     fetchLeaveRequests();
     fetchShiftChangeRequests();
+    fetchCompOffRequests();
     // Fetch comp-off summary per employee (for pretext in approval cards)
     if (currentUser.type === 'admin' || currentUser.type === 'manager' || currentUser.type === 'team_lead') {
       api.holidays.compOffsByEmployee().then((data) => setCompOffSummary(data.comp_off_summary || {})).catch(() => {});
@@ -832,6 +846,30 @@ export default function App() {
     }
   }, [fetchShiftChangeRequests, showToast]);
 
+  const handleApproveCompOffRequest = useCallback(async (requestId) => {
+    if (hasApi()) {
+      try {
+        await api.holidays.approveCompOffRequest(requestId);
+        fetchCompOffRequests();
+        showToast('Comp Off request approved');
+      } catch (e) {
+        showToast(typeof e.data?.error === 'string' ? e.data.error : (e.message || 'Failed to approve'), 'error');
+      }
+    }
+  }, [fetchCompOffRequests, showToast]);
+
+  const handleRejectCompOffRequest = useCallback(async (requestId) => {
+    if (hasApi()) {
+      try {
+        await api.holidays.rejectCompOffRequest(requestId);
+        fetchCompOffRequests();
+        showToast('Comp Off request rejected', 'error');
+      } catch (e) {
+        showToast(typeof e.data?.error === 'string' ? e.data.error : (e.message || 'Failed to reject'), 'error');
+      }
+    }
+  }, [fetchCompOffRequests, showToast]);
+
   const handleRejectLeave = useCallback(async (requestId, notes) => {
     if (hasApi()) {
       try {
@@ -1147,7 +1185,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex bg-gray-50 dark:bg-slate-900 text-gray-900 dark:text-white">
+    <div className="h-screen flex overflow-hidden bg-gray-50 dark:bg-slate-900 text-gray-900 dark:text-white">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:z-[100] focus:top-2 focus:left-2 focus:px-4 focus:py-2 focus:bg-brand focus:text-white focus:rounded-lg focus:text-sm focus:font-medium"
@@ -1477,6 +1515,7 @@ export default function App() {
                 currentUser={currentUser}
                 onApprove={handleApproveLeave}
                 onReject={handleRejectLeave}
+                onCancelLeave={handleCancelLeave}
                 isDark={isDark}
                 approvalsOnly={true}
                 shiftChangeRequests={shiftChangeRequests}
@@ -1548,6 +1587,7 @@ export default function App() {
               <CompOffView
                 isDark={isDark}
                 currentUser={currentUser}
+                myCompOffRequests={compOffRequests.filter(r => r.user_id === currentUser.id)}
                 showToast={showToast}
               />
             </ErrorBoundary>
@@ -1700,6 +1740,10 @@ export default function App() {
         onAcknowledge={handleAcknowledgeLeave}
         shiftChangeRequests={shiftChangeRequests}
         allShiftChangeRequests={allShiftChangeRequests}
+        compOffRequests={compOffRequests}
+        allCompOffRequests={allCompOffRequests}
+        onApproveCompOffRequest={handleApproveCompOffRequest}
+        onRejectCompOffRequest={handleRejectCompOffRequest}
         onApproveShiftChange={handleApproveShiftChange}
         onRejectShiftChange={handleRejectShiftChange}
         onAcknowledgeShiftChange={handleAcknowledgeShiftChange}

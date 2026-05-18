@@ -24,6 +24,13 @@ export default function LeaveReportView({ isDark, currentUser }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortField, setSortField] = useState('employee_name');
   const [sortDir, setSortDir] = useState('asc');
+  const [adjustModal, setAdjustModal] = useState(null);
+  const [adjusting, setAdjusting] = useState(false);
+
+  const isHRorFinance = currentUser?.department_name === 'HR' || currentUser?.department_name === 'Human Resources' || currentUser?.department_name === 'Finance';
+  const isAdmin = currentUser?.role === 'admin';
+  const isManager = currentUser?.role === 'manager';
+  const canAdjust = isAdmin || isHRorFinance || isManager;
 
   const card = isDark ? 'bg-slate-800/80 border-slate-700 text-white' : 'bg-white border-gray-200 text-gray-900';
   const subtleText = isDark ? 'text-gray-400' : 'text-gray-500';
@@ -146,8 +153,31 @@ export default function LeaveReportView({ isDark, currentUser }) {
     URL.revokeObjectURL(url);
   };
 
+  const handleAdjustSave = async (e) => {
+    e.preventDefault();
+    setAdjusting(true);
+    try {
+      await api.leaveRequests.adjustBalance(adjustModal.employee_id, {
+        year,
+        casual: adjustModal.cl_left !== '' ? parseFloat(adjustModal.cl_left) : null,
+        casual_used: adjustModal.cl_used !== '' ? parseFloat(adjustModal.cl_used) : null,
+        sick: adjustModal.sl_left !== '' ? parseFloat(adjustModal.sl_left) : null,
+        sick_used: adjustModal.sl_used !== '' ? parseFloat(adjustModal.sl_used) : null,
+        comp: adjustModal.comp !== '' ? parseFloat(adjustModal.comp) : null,
+        nhco: adjustModal.nhco !== '' ? parseFloat(adjustModal.nhco) : null,
+        lop: adjustModal.lop !== '' ? parseFloat(adjustModal.lop) : null,
+      });
+      setAdjustModal(null);
+      fetchBalances();
+    } catch (err) {
+      alert(err.message || 'Failed to adjust balance');
+    } finally {
+      setAdjusting(false);
+    }
+  };
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto w-full">
+    <div className="space-y-6 w-full max-w-7xl mx-auto pb-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Leave Report</h1>
@@ -191,6 +221,7 @@ export default function LeaveReportView({ isDark, currentUser }) {
                   <th className={`text-center px-3 py-3 text-xs font-medium cursor-pointer select-none ${subtleText}`} onClick={() => handleSort('lop')}>LOP <SortIcon field="lop" /></th>
                   <th className={`text-center px-3 py-3 text-xs font-medium cursor-pointer select-none ${subtleText}`} onClick={() => handleSort('total')}>Total Used <SortIcon field="total" /></th>
                   <th className={`text-center px-3 py-3 text-xs font-medium cursor-pointer select-none ${subtleText}`} onClick={() => handleSort('total_rem')}>Total Rem <SortIcon field="total_rem" /></th>
+                  {canAdjust && <th className={`text-center px-3 py-3 text-xs font-medium ${subtleText}`}>Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -215,6 +246,27 @@ export default function LeaveReportView({ isDark, currentUser }) {
                     <td className="px-3 py-3 text-center"><span className={`font-semibold ${b.loss_of_pay?.used > 0 ? 'text-red-500' : ''}`}>{fmtLeave(b.loss_of_pay?.used)}</span></td>
                     <td className="px-3 py-3 text-center font-bold text-gray-700 dark:text-gray-300">{fmtLeave(b.total_used)}</td>
                     <td className="px-3 py-3 text-center font-bold text-green-600 dark:text-green-400">{fmtLeave(b.total_remaining)}</td>
+                    {canAdjust && (
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setAdjustModal({
+                            employee_id: b.employee_id,
+                            name: b.employee_name,
+                            cl_used: b.casual?.used ?? '',
+                            cl_left: b.casual?.remaining ?? '',
+                            sl_used: b.sick?.used ?? '',
+                            sl_left: b.sick?.remaining ?? '',
+                            comp: b.comp?.available ?? '',
+                            nhco: b.nhco?.remaining ?? b.stored_balances?.national_holiday_comp_off ?? '',
+                            lop: b.loss_of_pay?.used ?? ''
+                          })}
+                          className="text-xs font-medium text-brand hover:underline"
+                        >
+                          Adjust
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -230,9 +282,58 @@ export default function LeaveReportView({ isDark, currentUser }) {
                   <td className="px-3 py-3 text-center font-bold text-red-500">{totals.lop}</td>
                   <td className="px-3 py-3 text-center font-bold text-gray-700 dark:text-gray-300">{totals.totalUsed}</td>
                   <td className="px-3 py-3 text-center font-bold text-green-600 dark:text-green-400">{totals.totalRem}</td>
+                  {canAdjust && <td className="px-3 py-3"></td>}
                 </tr>
               </tfoot>
             </table>
+          </div>
+        </div>
+      )}
+
+      {adjustModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className={`w-full max-w-sm rounded-xl shadow-xl p-5 ${isDark ? 'bg-slate-800 border border-slate-700 text-white' : 'bg-white text-gray-900'}`}>
+            <h3 className="text-lg font-semibold mb-1">Adjust Balances</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">Manually override leave data for {adjustModal.name} ({year})</p>
+            <form onSubmit={handleAdjustSave} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium mb-1">CL Used</label>
+                  <input type="number" step="0.5" value={adjustModal.cl_used} onChange={e => setAdjustModal({...adjustModal, cl_used: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">CL Left</label>
+                  <input type="number" step="0.5" value={adjustModal.cl_left} onChange={e => setAdjustModal({...adjustModal, cl_left: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">SL Used</label>
+                  <input type="number" step="0.5" value={adjustModal.sl_used} onChange={e => setAdjustModal({...adjustModal, sl_used: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">SL Left</label>
+                  <input type="number" step="0.5" value={adjustModal.sl_left} onChange={e => setAdjustModal({...adjustModal, sl_left: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Comp</label>
+                  <input type="number" step="0.5" value={adjustModal.comp} onChange={e => setAdjustModal({...adjustModal, comp: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">NHC</label>
+                  <input type="number" step="0.5" value={adjustModal.nhco} onChange={e => setAdjustModal({...adjustModal, nhco: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">LOP</label>
+                  <input type="number" step="0.5" value={adjustModal.lop} onChange={e => setAdjustModal({...adjustModal, lop: e.target.value})} className={inputCls + ' w-full'} placeholder="Auto" />
+                </div>
+              </div>
+              <p className="text-xs text-gray-400 dark:text-gray-500 italic mt-2 text-center">Leave blank to use system defaults.</p>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setAdjustModal(null)} className={`px-4 py-2 rounded-lg text-sm font-medium border ${isDark ? 'border-slate-600 text-gray-300 hover:bg-slate-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}>Cancel</button>
+                <button type="submit" disabled={adjusting} className="px-4 py-2 rounded-lg text-sm font-medium bg-brand text-white hover:bg-brand-hover disabled:opacity-50">
+                  {adjusting ? 'Saving...' : 'Save Balances'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

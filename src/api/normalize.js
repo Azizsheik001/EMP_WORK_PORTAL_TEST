@@ -104,18 +104,16 @@ export function buildShiftRowsFromApi(apiShifts, options = {}) {
   const byUser = {};
   list.forEach((s) => {
     const uid = s.user_id;
-    if (!byUser[uid]) byUser[uid] = { user_id: uid, employee_name: s.employee_name, department_id: s.department_id || null, shifts: [] };
+    if (!byUser[uid]) byUser[uid] = { user_id: uid, employee_name: s.employee_name, department_id: s.department_id || null, shifts: [], work_timezone: s.work_timezone };
     byUser[uid].shifts.push(s);
   });
-  const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const nowMin = nowIST.getHours() * 60 + nowIST.getMinutes();
   const actualTodayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   const isViewingPastDate = today < actualTodayIST;
 
   // Strip seconds from time strings: "19:30:00" → "19:30"
   const fmtShiftTime = (t) => t ? t.split(':').slice(0, 2).join(':') : null;
 
-  return Object.values(byUser).map(({ user_id, employee_name, department_id, shifts }) => {
+  return Object.values(byUser).map(({ user_id, employee_name, department_id, shifts, work_timezone }) => {
     const forToday = shifts.find((s) => s.shift_date === today);
     const s = forToday || shifts[0];
     let clockInAt = s.clock_in_at;
@@ -144,14 +142,20 @@ export function buildShiftRowsFromApi(apiShifts, options = {}) {
     // Also check if user has an active clock-in from a previous shift (overnight / forgot to logout)
     const activeFromOtherShift = !clockInAt && shifts.find((sh) => sh.shift_date !== today && sh.clock_in_at && !sh.clock_out_at);
 
+    // Get current time in user's timezone
+    const tz = work_timezone || 'Asia/Kolkata';
+    const nowTz = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
+    const nowMin = nowTz.getHours() * 60 + nowTz.getMinutes();
+
     const startTime = s.shift_start_time;
     const endTime = s.shift_end_time;
-    const hasShiftToday = s.shift_date === today && startTime && endTime;
+    const isValidShiftTime = (t) => t && String(t).toUpperCase() !== 'OFF';
+    const hasShiftToday = s.shift_date === today && !s.is_off && isValidShiftTime(startTime) && isValidShiftTime(endTime);
 
     // Pre-compute shift timing info (reused in multiple places)
     let shiftStartMin = 0, shiftEndMin = 0, currentMin = nowMin;
     let isOvernightShift = false;
-    if (startTime && endTime) {
+    if (isValidShiftTime(startTime) && isValidShiftTime(endTime)) {
       const [sh, sm] = startTime.split(':').map(Number);
       shiftStartMin = sh * 60 + (sm || 0);
       const [eh, em] = endTime.split(':').map(Number);
@@ -259,6 +263,8 @@ export function buildShiftRowsFromApi(apiShifts, options = {}) {
       if (leaveType === 'work_from_home') shiftTime = 'Work From Home';
       else if (leaveType === 'half_day') shiftTime = 'Half Day Leave';
       else shiftTime = 'On Leave';
+    } else if (s.is_off === true || !isValidShiftTime(startTime) || !isValidShiftTime(endTime)) {
+      shiftTime = 'Off';
     } else if (fmtShiftTime(startTime) && fmtShiftTime(endTime)) {
       shiftTime = `${fmtShiftTime(startTime)}-${fmtShiftTime(endTime)}`;
     } else {

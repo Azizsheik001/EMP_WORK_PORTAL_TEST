@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate, requireRole } from '../middleware/auth.js';
 import { query, getWeekDateRange } from '../lib/db.js';
-import { checkAndCreditCompOff } from './holidays.js';
+import { createCompOffRequest } from './holidays.js';
 
 const router = Router();
 
@@ -280,16 +280,18 @@ router.get('/', authenticate, async (req, res, next) => {
     }
 
     const r = await query(
-      `SELECT
+      `SELECT DISTINCT ON (sa.shift_date, u.id)
          u.id AS user_id,
          u.name AS employee_name,
          u.role,
+         u.work_timezone,
          u.department_id,
          d.name AS department_name,
          COALESCE(u.client_id, sa.client_id) AS client_id,
          sa.shift_date,
          sa.shift_start_time,
          sa.shift_end_time,
+         sa.is_off,
          (SELECT ce_in.created_at FROM clock_events ce_in
           WHERE ce_in.user_id = u.id AND ce_in.shift_date = sa.shift_date AND ce_in.event_type IN ('clock_in','in')
           ORDER BY ce_in.created_at DESC LIMIT 1) AS clock_in_at,
@@ -315,7 +317,7 @@ router.get('/', authenticate, async (req, res, next) => {
        LEFT JOIN departments d ON d.id = u.department_id
        WHERE sa.shift_date >= $1 AND sa.shift_date <= $2
          AND ($3::uuid IS NULL OR u.client_id = $3 OR u.id IN (SELECT uca.user_id FROM user_client_assignments uca WHERE uca.client_id = $3))
-       ORDER BY sa.shift_date, u.name`,
+       ORDER BY sa.shift_date, u.id, sa.updated_at DESC`,
       [startDate, endDate, clientId]
     );
 
@@ -324,6 +326,7 @@ router.get('/', authenticate, async (req, res, next) => {
       user_id: row.user_id,
       employee_name: row.employee_name,
       role: row.role,
+      work_timezone: row.work_timezone,
       department_id: row.department_id,
       department_name: row.department_name,
       client_id: row.client_id,
@@ -331,6 +334,7 @@ router.get('/', authenticate, async (req, res, next) => {
       shift_start_time: row.shift_start_time,
       shift_end_time: row.shift_end_time,
       shift_time: `${row.shift_start_time} - ${row.shift_end_time}`,
+      is_off: row.is_off,
       clock_in_at: row.clock_in_at,
       clock_out_at: row.clock_out_at,
       clock_in_by: row.clock_in_by || null,
@@ -573,8 +577,9 @@ router.post('/clock-out', authenticate, async (req, res, next) => {
         const inTime = new Date(inEvent.rows[0].created_at);
         const outTime = new Date(); // now
         const hoursWorked = (outTime - inTime) / (1000 * 60 * 60);
-        if (hoursWorked >= 8) {
-          compOff = await checkAndCreditCompOff(req.user.sub, shiftDate);
+        if (hoursWorked >= 4) {
+          const compResult = await createCompOffRequest(req.user.sub, shiftDate, hoursWorked);
+          if (compResult) compOff = compResult;
         }
       }
     } catch (err) {
@@ -754,9 +759,9 @@ router.post('/admin-clock-out', authenticate, requireRole('admin', 'manager', 't
         const inTime = new Date(inEvent.rows[0].created_at);
         const outTime = new Date(); // now
         const hoursWorked = (outTime - inTime) / (1000 * 60 * 60);
-        if (hoursWorked >= 8) {
-          const compResult = await checkAndCreditCompOff(user_id, targetShiftDate);
-          if (compResult) compOffMsg = ' (Eligible for Comp Off)';
+        if (hoursWorked >= 4) {
+          const compResult = await createCompOffRequest(user_id, targetShiftDate, hoursWorked);
+          if (compResult) compOffMsg = ' (Comp Off Request Sent)';
         }
       }
     } catch (err) {
@@ -780,7 +785,7 @@ router.get('/grid', authenticate, async (req, res, next) => {
     let r;
     try {
       r = await query(
-        `SELECT sa.user_id, u.name AS employee_name, u.role, sa.shift_date,
+        `SELECT DISTINCT ON (u.id, sa.shift_date) sa.user_id, u.name AS employee_name, u.role, sa.shift_date,
                 sa.shift_start_time, sa.shift_end_time, sa.is_off
          FROM shift_assignments sa
          JOIN users u ON u.id = sa.user_id AND u.deleted_at IS NULL
@@ -795,14 +800,14 @@ router.get('/grid', authenticate, async (req, res, next) => {
                (sa.client_id = u.client_id OR sa.client_id IS NULL)
            END
            AND ($4::uuid IS NULL OR u.department_id = $4 OR u.id IN (SELECT uda.user_id FROM user_department_assignments uda WHERE uda.department_id = $4))
-         ORDER BY u.name, sa.shift_date`,
+         ORDER BY u.id, sa.shift_date, sa.updated_at DESC`,
         [from, to, clientId, departmentId]
       );
     } catch (e) {
       if (e.code === '42703' || e.code === '42P01') {
         try {
           r = await query(
-            `SELECT sa.user_id, u.name AS employee_name, u.role, sa.shift_date,
+            `SELECT DISTINCT ON (u.id, sa.shift_date) sa.user_id, u.name AS employee_name, u.role, sa.shift_date,
                     sa.shift_start_time, sa.shift_end_time
              FROM shift_assignments sa
              JOIN users u ON u.id = sa.user_id AND u.deleted_at IS NULL
@@ -814,7 +819,7 @@ router.get('/grid', authenticate, async (req, res, next) => {
                    (sa.client_id = u.client_id OR sa.client_id IS NULL)
                END
                AND ($4::uuid IS NULL OR u.department_id = $4)
-             ORDER BY u.name, sa.shift_date`,
+             ORDER BY u.id, sa.shift_date, sa.updated_at DESC`,
             [from, to, clientId, departmentId]
           );
         } catch (e2) {

@@ -109,17 +109,37 @@ router.post('/', authenticate, requireRole('employee', 'team_lead', 'manager', '
     // If requesting comp leave, validate available comp-offs
     if (body.leave_type === 'comp') {
       try {
-        const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-        const compCheck = await query(
-          `SELECT COUNT(*) AS available FROM comp_offs
-           WHERE user_id = $1 AND status = 'earned' AND (expiry_date IS NULL OR expiry_date >= $2)`,
-          [employeeId, todayIST]
-        );
-        const available = parseInt(compCheck.rows[0]?.available || '0', 10);
+        const year = new Date(body.start_date).getFullYear();
+        
+        // 1. Check for manual override in leave_balances
+        const dbBal = await query(`SELECT compensatory_off FROM leave_balances WHERE user_id = $1 AND year = $2`, [employeeId, year]);
+        
+        let allocatedComp = 0;
+        if (dbBal.rowCount > 0 && dbBal.rows[0].compensatory_off != null) {
+          allocatedComp = parseFloat(dbBal.rows[0].compensatory_off);
+        } else {
+          // 2. Default to comp_offs table
+          const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+          const compCheck = await query(
+            `SELECT COUNT(*) AS available FROM comp_offs
+             WHERE user_id = $1 AND status = 'earned' AND (expiry_date IS NULL OR expiry_date >= $2)`,
+            [employeeId, todayIST]
+          );
+          allocatedComp = parseInt(compCheck.rows[0]?.available || '0', 10);
+        }
+
+        // 3. Subtract already used comp offs in that year
+        const usedQuery = await query(`SELECT SUM(total_days) as used FROM leave_requests WHERE employee_id = $1 AND leave_type = 'comp' AND status = 'approved' AND EXTRACT(YEAR FROM start_date) = $2`, [employeeId, year]);
+        const usedComp = parseFloat(usedQuery.rows[0]?.used || '0');
+        
+        const available = Math.round(Math.max(0, allocatedComp - usedComp) * 100) / 100;
+
         if (available < body.total_days) {
           return res.status(400).json({ error: `You only have ${available} comp leave${available !== 1 ? 's' : ''} available. Cannot request ${body.total_days} day${body.total_days > 1 ? 's' : ''}.` });
         }
-      } catch { /* comp_offs table may not exist — allow request */ }
+      } catch (e) {
+        console.error('Comp validation error:', e.message);
+      }
     }
 
     // Check requester's role and team lead assignment
@@ -331,16 +351,19 @@ router.get('/balance-all', authenticate, requireRole('admin', 'manager', 'team_l
 
     // Fetch manual leave balances from leave_balances table
     const { rows: dbBalances } = await query(
-      `SELECT user_id, casual_leave, sick_leave, compensatory_off, national_holiday_comp_off FROM leave_balances WHERE year = $1`,
+      `SELECT user_id, casual_leave, sick_leave, compensatory_off, national_holiday_comp_off, loss_of_pay, casual_leave_used, sick_leave_used FROM leave_balances WHERE year = $1`,
       [year]
     );
     const dbBalMap = {};
     for (const b of dbBalances) {
       dbBalMap[b.user_id] = { 
         casual: b.casual_leave !== null ? parseFloat(b.casual_leave) : undefined,
+        casual_used: b.casual_leave_used !== null ? parseFloat(b.casual_leave_used) : undefined,
         sick: b.sick_leave !== null ? parseFloat(b.sick_leave) : undefined,
+        sick_used: b.sick_leave_used !== null ? parseFloat(b.sick_leave_used) : undefined,
         comp: b.compensatory_off !== null ? parseFloat(b.compensatory_off) : undefined,
-        nhco: b.national_holiday_comp_off !== null ? parseFloat(b.national_holiday_comp_off) : 0 
+        nhco: b.national_holiday_comp_off !== null ? parseFloat(b.national_holiday_comp_off) : 0,
+        lop: b.loss_of_pay !== null ? parseFloat(b.loss_of_pay) : undefined
       };
     }
 
@@ -371,38 +394,43 @@ router.get('/balance-all', authenticate, requireRole('admin', 'manager', 'team_l
         }
       }
 
-      const clUsed   = byType.casual.used;
-      const slUsed   = byType.sick.used;
-      const compUsed = byType.comp.used;
-      const nhcoUsed = byType.nhco.used;
-      const lopUsed  = byType.loss_of_pay.used;
+      const clUsed   = byType.casual.used + byType.casual.planned;
+      const slUsed   = byType.sick.used + byType.sick.planned;
+      const compUsed = byType.comp.used + byType.comp.planned;
+      const nhcoUsed = byType.nhco.used + byType.nhco.planned;
+      const lopUsed  = byType.loss_of_pay.used + byType.loss_of_pay.planned;
 
-      // CL: if in DB, DB value IS the remaining; allocated = remaining + used
-      let clRem, clAllocatedFinal;
-      if (hasDatabaseBalance && empDbBal.casual !== undefined) {
-        clRem = Math.round(parseFloat(empDbBal.casual) * 100) / 100;
-        clAllocatedFinal = Math.round((clRem + clUsed) * 100) / 100;
-      } else {
-        clAllocatedFinal = clAllocated;
-        clRem = Math.round(Math.max(0, clAllocated - clUsed) * 100) / 100;
+      // LOP manual override
+      const lopFinal = hasDatabaseBalance && empDbBal.lop != null ? Math.max(parseFloat(empDbBal.lop), lopUsed) : lopUsed;
+
+      // CL: Reconstruct Total Allocated from manual overrides (Left + Used), then subtract LIVE used leaves
+      let clAllocatedFinal = clAllocated;
+      let clUsedFinal = clUsed;
+      if (hasDatabaseBalance && empDbBal.casual != null && empDbBal.casual_used != null) {
+        clAllocatedFinal = Math.round((parseFloat(empDbBal.casual) + parseFloat(empDbBal.casual_used)) * 100) / 100;
+        clUsedFinal = Math.max(clUsed, parseFloat(empDbBal.casual_used));
+      } else if (hasDatabaseBalance && empDbBal.casual != null) {
+        clAllocatedFinal = Math.round((parseFloat(empDbBal.casual) + clUsed) * 100) / 100;
       }
+      const clRem = Math.round(Math.max(0, clAllocatedFinal - clUsedFinal) * 100) / 100;
 
       // SL: same logic
-      let slRem, slAllocatedFinal;
-      if (hasDatabaseBalance && empDbBal.sick !== undefined) {
-        slRem = Math.round(parseFloat(empDbBal.sick) * 100) / 100;
-        slAllocatedFinal = Math.round((slRem + slUsed) * 100) / 100;
-      } else {
-        slAllocatedFinal = slAllocated;
-        slRem = Math.round(Math.max(0, slAllocated - slUsed) * 100) / 100;
+      let slAllocatedFinal = slAllocated;
+      let slUsedFinal = slUsed;
+      if (hasDatabaseBalance && empDbBal.sick != null && empDbBal.sick_used != null) {
+        slAllocatedFinal = Math.round((parseFloat(empDbBal.sick) + parseFloat(empDbBal.sick_used)) * 100) / 100;
+        slUsedFinal = Math.max(slUsed, parseFloat(empDbBal.sick_used));
+      } else if (hasDatabaseBalance && empDbBal.sick != null) {
+        slAllocatedFinal = Math.round((parseFloat(empDbBal.sick) + slUsed) * 100) / 100;
       }
+      const slRem = Math.round(Math.max(0, slAllocatedFinal - slUsedFinal) * 100) / 100;
 
-      const empCompAllocated = hasDatabaseBalance && empDbBal.comp !== undefined
+      const empCompAllocated = hasDatabaseBalance && empDbBal.comp != null
         ? parseFloat(empDbBal.comp)
         : (compByEmployee[emp.id] || 0);
       const compRem = Math.round(Math.max(0, empCompAllocated - compUsed) * 100) / 100;
 
-      const empNhco = hasDatabaseBalance && empDbBal.nhco !== undefined ? empDbBal.nhco : 0;
+      const empNhco = hasDatabaseBalance && empDbBal.nhco != null ? parseFloat(empDbBal.nhco) : 0;
       const nhcoRem = Math.round(Math.max(0, empNhco - nhcoUsed) * 100) / 100;
 
       return {
@@ -412,17 +440,52 @@ router.get('/balance-all', authenticate, requireRole('admin', 'manager', 'team_l
         role: emp.role,
         designation: emp.designation,
         department_name: emp.department_name,
-        casual: { total: CASUAL_LEAVE_TOTAL, allocated: clAllocatedFinal, used: clUsed, planned: byType.casual.planned, remaining: clRem },
-        sick: { total: SICK_LEAVE_TOTAL, allocated: slAllocatedFinal, used: slUsed, planned: byType.sick.planned, remaining: slRem },
+        casual: { total: CASUAL_LEAVE_TOTAL, allocated: clAllocatedFinal, used: clUsedFinal, planned: byType.casual.planned, remaining: clRem },
+        sick: { total: SICK_LEAVE_TOTAL, allocated: slAllocatedFinal, used: slUsedFinal, planned: byType.sick.planned, remaining: slRem },
         comp: { available: empCompAllocated, used: compUsed, planned: byType.comp.planned, remaining: compRem },
         nhco: { available: empNhco, used: nhcoUsed, planned: byType.nhco.planned, remaining: nhcoRem },
-        loss_of_pay: { used: lopUsed, planned: byType.loss_of_pay.planned },
-        total_used: Math.round((clUsed + slUsed + compUsed + lopUsed + nhcoUsed) * 100) / 100,
+        loss_of_pay: { used: lopFinal, planned: byType.loss_of_pay.planned },
+        total_used: Math.round((clUsedFinal + slUsedFinal + compUsed + lopFinal + nhcoUsed) * 100) / 100,
         total_remaining: Math.round((clRem + slRem + compRem + nhcoRem) * 100) / 100,
       };
     });
 
     res.json({ year, month: month || null, balances });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---------- PUT /balance/:userId — Manually set leave balances ----------
+router.put('/balance/:userId', authenticate, async (req, res, next) => {
+  try {
+    await migrate();
+    const targetUserId = req.params.userId;
+    const year = req.body.year || new Date().getFullYear();
+
+    const actorResult = await query(`SELECT d.name AS department_name FROM users u LEFT JOIN departments d ON d.id = u.department_id WHERE u.id = $1`, [req.user.sub]);
+    const isHRorFinance = ['HR', 'Human Resources', 'Finance'].includes(actorResult.rows[0]?.department_name);
+
+    if (req.user.role !== 'admin' && req.user.role !== 'manager' && !isHRorFinance) {
+      return res.status(403).json({ error: 'Only HR, Finance or Admins can adjust leave balances' });
+    }
+
+    const { casual, casual_used, sick, sick_used, comp, nhco, lop } = req.body;
+
+    const existing = await query(`SELECT id FROM leave_balances WHERE user_id = $1 AND year = $2`, [targetUserId, year]);
+    if (existing.rowCount > 0) {
+      await query(
+        `UPDATE leave_balances SET casual_leave = $1, sick_leave = $2, compensatory_off = $3, national_holiday_comp_off = $4, loss_of_pay = $5, casual_leave_used = $6, sick_leave_used = $7 WHERE user_id = $8 AND year = $9`,
+        [casual, sick, comp, nhco, lop, casual_used, sick_used, targetUserId, year]
+      );
+    } else {
+      await query(
+        `INSERT INTO leave_balances (user_id, year, casual_leave, sick_leave, compensatory_off, national_holiday_comp_off, loss_of_pay, casual_leave_used, sick_leave_used) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [targetUserId, year, casual, sick, comp, nhco, lop, casual_used, sick_used]
+      );
+    }
+
+    res.json({ ok: true });
   } catch (e) {
     next(e);
   }
@@ -780,14 +843,39 @@ router.delete('/:id', authenticate, async (req, res, next) => {
 
     const lr = lrResult.rows[0];
 
-    // Only the employee who created it can cancel, or an admin
-    if (lr.employee_id !== userId && req.user.role !== 'admin') {
+    const actorResult = await query(`SELECT d.name AS department_name FROM users u LEFT JOIN departments d ON d.id = u.department_id WHERE u.id = $1`, [userId]);
+    const isHRorFinance = ['HR', 'Human Resources', 'Finance'].includes(actorResult.rows[0]?.department_name);
+    const canWithdrawApproved = req.user.role === 'admin' || req.user.role === 'manager' || isHRorFinance;
+
+    // Only the employee who created it can cancel, or an admin/HR/Finance
+    if (lr.employee_id !== userId && !canWithdrawApproved) {
       return res.status(403).json({ error: 'You can only cancel your own leave requests' });
     }
 
-    // Can only cancel pending requests (not already approved/rejected)
+    // Can only cancel pending requests (not already approved/rejected) unless Admin/HR/Finance/Manager
     if (!PENDING_STATUSES.includes(lr.status)) {
-      return res.status(400).json({ error: 'Only pending leave requests can be cancelled' });
+      if (lr.status === 'approved' && canWithdrawApproved) {
+        // Allow withdrawal of approved leave
+        // If it was a comp off, we must revert it!
+        if ((lr.leave_type || '').toLowerCase() === 'comp') {
+          try {
+            await query(
+              `UPDATE comp_offs SET status = 'earned', used_date = NULL
+               WHERE user_id = $1 AND status = 'used' AND used_date = $2
+               AND id IN (
+                 SELECT id FROM comp_offs
+                 WHERE user_id = $1 AND status = 'used' AND used_date = $2
+                 LIMIT $3
+               )`,
+              [lr.employee_id, lr.start_date ? String(lr.start_date).slice(0, 10) : null, Math.ceil(lr.total_days || 1)]
+            );
+          } catch (e) {
+            console.warn('Revert comp_offs warning:', e.message);
+          }
+        }
+      } else {
+        return res.status(400).json({ error: 'Only pending leave requests can be cancelled' });
+      }
     }
 
     await query(`DELETE FROM leave_requests WHERE id = $1`, [id]);

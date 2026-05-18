@@ -257,7 +257,7 @@ export default function FoodCabView({ isDark, currentUser, showToast }) {
   }
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto w-full">
+    <div className="space-y-6 w-full h-full flex flex-col">
       {/* Header */}
       <div>
         <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Allowances</h1>

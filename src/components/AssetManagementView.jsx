@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { api } from '../api/client';
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -96,6 +96,18 @@ export default function AssetManagementView({ isDark, currentUser, showToast }) 
   const [filterCategory, setFilterCategory] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Expandable groups
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const toggleGroup = (empId, e) => {
+    e.stopPropagation();
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(empId)) next.delete(empId);
+      else next.add(empId);
+      return next;
+    });
+  };
 
   // Modals
   const [addAssetOpen, setAddAssetOpen] = useState(false);
@@ -357,9 +369,45 @@ export default function AssetManagementView({ isDark, currentUser, showToast }) 
   useEffect(() => { setCurrentPage(1); }, [searchQuery, filterCategory, filterStatus, subView]);
   useEffect(() => { setCurrentEmpPage(1); }, [employeeAssets, subView]);
 
-  const sortedFiltered = useMemo(() => [...filteredAssets].sort((a, b) => (a.assigned_to_name || 'ZZZ').localeCompare(b.assigned_to_name || 'ZZZ')), [filteredAssets]);
-  const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / itemsPerPage));
-  const paginatedAssets = useMemo(() => sortedFiltered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [sortedFiltered, currentPage]);
+  const sortedFiltered = useMemo(() => [...filteredAssets].sort((a, b) => {
+    const nameA = a.assigned_to_name || 'ZZZ';
+    const nameB = b.assigned_to_name || 'ZZZ';
+    if (nameA !== nameB) return nameA.localeCompare(nameB);
+    // Sort Laptop/Primary first
+    const catA = a.category_name?.toLowerCase() || '';
+    const catB = b.category_name?.toLowerCase() || '';
+    if (catA === 'laptop' && catB !== 'laptop') return -1;
+    if (catA !== 'laptop' && catB === 'laptop') return 1;
+    return 0;
+  }), [filteredAssets]);
+
+  const groupedFiltered = useMemo(() => {
+    const groups = [];
+    const empMap = new Map();
+
+    sortedFiltered.forEach(asset => {
+      if (!asset.assigned_to_id) {
+        groups.push({ isGroup: false, ...asset });
+      } else {
+        if (!empMap.has(asset.assigned_to_id)) {
+          const newGroup = { isGroup: true, assigned_to_id: asset.assigned_to_id, assigned_to_name: asset.assigned_to_name, assets: [] };
+          empMap.set(asset.assigned_to_id, newGroup);
+          groups.push(newGroup);
+        }
+        empMap.get(asset.assigned_to_id).assets.push(asset);
+      }
+    });
+    
+    return groups.map(g => {
+      if (g.isGroup && g.assets.length === 1) {
+        return { isGroup: false, ...g.assets[0] };
+      }
+      return g;
+    });
+  }, [sortedFiltered]);
+
+  const totalPages = Math.max(1, Math.ceil(groupedFiltered.length / itemsPerPage));
+  const paginatedGroups = useMemo(() => groupedFiltered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [groupedFiltered, currentPage]);
 
   const sortedEmployeeKits = useMemo(() => [...employeeAssets].sort((a, b) => (a.employee_name || '').localeCompare(b.employee_name || '')), [employeeAssets]);
   const empTotalPages = Math.max(1, Math.ceil(sortedEmployeeKits.length / itemsPerPage));
@@ -494,78 +542,183 @@ export default function AssetManagementView({ isDark, currentUser, showToast }) 
                       </tr>
                     </thead>
                     <tbody>
-                      {paginatedAssets.map((asset) => {
-                        const dep = calcDepreciation(asset.purchase_date, parseFloat(asset.purchase_cost));
-                        return (
-                          <tr key={asset.id} className={`border-b cursor-pointer ${tableRowClass}`} onClick={() => setDetailAsset(asset)}>
-                            <td className="px-4 py-3 font-medium">
-                              {asset.assigned_to_name ? (
-                                <div className="flex items-center gap-3">
-                                  <div className="w-8 h-8 rounded-full bg-brand/10 text-brand flex items-center justify-center text-xs font-bold shrink-0">
-                                    {getInitials(asset.assigned_to_name)}
-                                  </div>
-                                  <span className="truncate max-w-[150px]" title={asset.assigned_to_name}>{asset.assigned_to_name}</span>
-                                </div>
-                              ) : (
-                                <span className="text-gray-400 italic">Unassigned</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getCategoryColor(asset.category_name)}`}>
-                                {asset.category_name || 'Other'}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 hidden md:table-cell font-mono text-xs">{asset.is_auto_tag ? '--' : (asset.asset_tag || '--')}</td>
-                            <td className="px-4 py-3">{asset.brand} {asset.model}</td>
-                            <td className="px-4 py-3">
-                              <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[asset.status]}`}>
-                                {STATUS_LABELS[asset.status]}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 hidden lg:table-cell">
-                              {asset.purchase_date && asset.purchase_cost ? (
-                                <div className="flex flex-col">
-                                  <div className="flex items-center gap-1.5">
-                                    <div className="w-16 h-1.5 rounded-full bg-gray-200 dark:bg-slate-600 overflow-hidden">
-                                      <div className={`h-full rounded-full ${dep.pct >= 100 ? 'bg-red-500' : dep.pct >= 75 ? 'bg-amber-500' : 'bg-green-500'}`} style={{ width: `${dep.pct}%` }} />
+                      {paginatedGroups.map((item) => {
+                        if (!item.isGroup) {
+                          const asset = item;
+                          const dep = calcDepreciation(asset.purchase_date, parseFloat(asset.purchase_cost));
+                          return (
+                            <tr key={asset.id} className={`border-b cursor-pointer ${tableRowClass}`} onClick={() => setDetailAsset(asset)}>
+                              <td className="px-4 py-3 font-medium">
+                                {asset.assigned_to_name ? (
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-full bg-brand/10 text-brand flex items-center justify-center text-xs font-bold shrink-0">
+                                      {getInitials(asset.assigned_to_name)}
                                     </div>
-                                    <span className={`text-xs font-medium ${dep.pct >= 100 ? 'text-red-600 dark:text-red-400' : dep.pct >= 75 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-600 dark:text-gray-400'}`}>
-                                      {dep.pct}%
-                                    </span>
+                                    <span className="truncate max-w-[150px]" title={asset.assigned_to_name}>{asset.assigned_to_name}</span>
                                   </div>
-                                  {dep.needsReplacement && (
-                                    <span className="text-[10px] text-red-500 font-medium mt-0.5">Needs replacement</span>
+                                ) : (
+                                  <span className="text-gray-400 italic">Unassigned</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getCategoryColor(asset.category_name)}`}>
+                                  {asset.category_name || 'Other'}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 hidden md:table-cell font-mono text-xs">{asset.asset_tag || '--'}</td>
+                              <td className="px-4 py-3">{asset.brand} {asset.model}</td>
+                              <td className="px-4 py-3">
+                                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[asset.status]}`}>
+                                  {STATUS_LABELS[asset.status]}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 hidden lg:table-cell">
+                                {asset.purchase_date && asset.purchase_cost ? (
+                                  <div className="flex flex-col">
+                                    <div className="flex items-center gap-1.5">
+                                      <div className="w-16 h-1.5 rounded-full bg-gray-200 dark:bg-slate-600 overflow-hidden">
+                                        <div className={`h-full rounded-full ${dep.pct >= 100 ? 'bg-red-500' : dep.pct >= 75 ? 'bg-amber-500' : 'bg-green-500'}`} style={{ width: `${dep.pct}%` }} />
+                                      </div>
+                                      <span className={`text-xs font-medium ${dep.pct >= 100 ? 'text-red-600 dark:text-red-400' : dep.pct >= 75 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-600 dark:text-gray-400'}`}>
+                                        {dep.pct}%
+                                      </span>
+                                    </div>
+                                    {dep.needsReplacement && (
+                                      <span className="text-[10px] text-red-500 font-medium mt-0.5">Needs replacement</span>
+                                    )}
+                                  </div>
+                                ) : '--'}
+                              </td>
+                              <td className={`px-4 py-3 hidden lg:table-cell ${warrantyClass(asset.warranty_expiry_date)}`}>
+                                {formatDate(asset.warranty_expiry_date)}
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                  {asset.status === 'available' && (
+                                    <button type="button" onClick={() => setAssignModalAsset(asset)} className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50 transition-colors tooltip-trigger" title="Assign">
+                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" /></svg>
+                                    </button>
                                   )}
-                                </div>
-                              ) : '--'}
-                            </td>
-                            <td className={`px-4 py-3 hidden lg:table-cell ${warrantyClass(asset.warranty_expiry_date)}`}>
-                              {formatDate(asset.warranty_expiry_date)}
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                                {asset.status === 'available' && (
-                                  <button type="button" onClick={() => setAssignModalAsset(asset)} className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50 transition-colors tooltip-trigger" title="Assign">
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" /></svg>
+                                  {asset.status === 'assigned' && (
+                                    <>
+                                      <button type="button" onClick={() => { setPrefillEmployee({ id: asset.assigned_to_id, name: asset.assigned_to_name }); setEditAsset(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-brand/10 text-brand hover:bg-brand/20 transition-colors" title="Add to Kit">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                      </button>
+                                      <button type="button" onClick={() => handleUnassign(asset)} className="p-1.5 rounded-lg bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-900/30 dark:text-orange-400 dark:hover:bg-orange-900/50 transition-colors" title="Unassign">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6" /></svg>
+                                      </button>
+                                    </>
+                                  )}
+                                  <button type="button" onClick={() => { setEditAsset(asset); setPrefillEmployee(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-gray-50 text-gray-600 hover:bg-gray-200 dark:bg-slate-700 dark:text-gray-300 dark:hover:bg-slate-600 transition-colors" title="Edit Asset">
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                                   </button>
-                                )}
-                                {asset.status === 'assigned' && (
-                                  <>
-                                    <button type="button" onClick={() => { setPrefillEmployee({ id: asset.assigned_to_id, name: asset.assigned_to_name }); setEditAsset(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-brand/10 text-brand hover:bg-brand/20 transition-colors" title="Add to Kit">
-                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        } else {
+                          // Grouped row
+                          const firstAsset = item.assets[0];
+                          const remainingAssets = item.assets.slice(1);
+                          const isExpanded = expandedGroups.has(item.assigned_to_id);
+                          const dep = calcDepreciation(firstAsset.purchase_date, parseFloat(firstAsset.purchase_cost));
+
+                          const renderAssetCols = (asset) => {
+                            const d = calcDepreciation(asset.purchase_date, parseFloat(asset.purchase_cost));
+                            return (
+                              <>
+                                <td className="px-4 py-3">
+                                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getCategoryColor(asset.category_name)}`}>
+                                    {asset.category_name || 'Other'}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 hidden md:table-cell font-mono text-xs">{asset.asset_tag || '--'}</td>
+                                <td className="px-4 py-3">{asset.brand} {asset.model}</td>
+                                <td className="px-4 py-3">
+                                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[asset.status]}`}>
+                                    {STATUS_LABELS[asset.status]}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 hidden lg:table-cell">
+                                  {asset.purchase_date && asset.purchase_cost ? (
+                                    <div className="flex flex-col">
+                                      <div className="flex items-center gap-1.5">
+                                        <div className="w-16 h-1.5 rounded-full bg-gray-200 dark:bg-slate-600 overflow-hidden">
+                                          <div className={`h-full rounded-full ${d.pct >= 100 ? 'bg-red-500' : d.pct >= 75 ? 'bg-amber-500' : 'bg-green-500'}`} style={{ width: `${d.pct}%` }} />
+                                        </div>
+                                        <span className={`text-xs font-medium ${d.pct >= 100 ? 'text-red-600 dark:text-red-400' : d.pct >= 75 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-600 dark:text-gray-400'}`}>
+                                          {d.pct}%
+                                        </span>
+                                      </div>
+                                      {d.needsReplacement && (
+                                        <span className="text-[10px] text-red-500 font-medium mt-0.5">Needs replacement</span>
+                                      )}
+                                    </div>
+                                  ) : '--'}
+                                </td>
+                                <td className={`px-4 py-3 hidden lg:table-cell ${warrantyClass(asset.warranty_expiry_date)}`}>
+                                  {formatDate(asset.warranty_expiry_date)}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                    {asset.status === 'assigned' && (
+                                      <>
+                                        <button type="button" onClick={() => { setPrefillEmployee({ id: asset.assigned_to_id, name: asset.assigned_to_name }); setEditAsset(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-brand/10 text-brand hover:bg-brand/20 transition-colors" title="Add to Kit">
+                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                                        </button>
+                                        <button type="button" onClick={() => handleUnassign(asset)} className="p-1.5 rounded-lg bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-900/30 dark:text-orange-400 dark:hover:bg-orange-900/50 transition-colors" title="Unassign">
+                                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6" /></svg>
+                                        </button>
+                                      </>
+                                    )}
+                                    <button type="button" onClick={() => { setEditAsset(asset); setPrefillEmployee(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-gray-50 text-gray-600 hover:bg-gray-200 dark:bg-slate-700 dark:text-gray-300 dark:hover:bg-slate-600 transition-colors" title="Edit Asset">
+                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                                     </button>
-                                    <button type="button" onClick={() => handleUnassign(asset)} className="p-1.5 rounded-lg bg-orange-50 text-orange-600 hover:bg-orange-100 dark:bg-orange-900/30 dark:text-orange-400 dark:hover:bg-orange-900/50 transition-colors" title="Unassign">
-                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7a4 4 0 11-8 0 4 4 0 018 0zM9 14a6 6 0 00-6 6v1h12v-1a6 6 0 00-6-6zM21 12h-6" /></svg>
-                                    </button>
-                                  </>
-                                )}
-                                <button type="button" onClick={() => { setEditAsset(asset); setPrefillEmployee(null); setAddAssetOpen(true); }} className="p-1.5 rounded-lg bg-gray-50 text-gray-600 hover:bg-gray-200 dark:bg-slate-700 dark:text-gray-300 dark:hover:bg-slate-600 transition-colors" title="Edit Asset">
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
+                                  </div>
+                                </td>
+                              </>
+                            );
+                          };
+
+                          return (
+                            <React.Fragment key={`group-${item.assigned_to_id}`}>
+                              {/* Parent Row */}
+                              <tr className={`border-b cursor-pointer ${tableRowClass}`} onClick={() => setDetailAsset(firstAsset)}>
+                                <td className="px-4 py-3 font-medium">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-full bg-brand/10 text-brand flex items-center justify-center text-xs font-bold shrink-0">
+                                      {getInitials(firstAsset.assigned_to_name)}
+                                    </div>
+                                    <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                                      <span className="truncate max-w-[150px]" title={firstAsset.assigned_to_name}>{firstAsset.assigned_to_name}</span>
+                                      <button 
+                                        type="button"
+                                        onClick={(e) => toggleGroup(item.assigned_to_id, e)} 
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 hover:bg-gray-50 dark:hover:bg-slate-600 text-[11px] font-medium text-gray-600 dark:text-gray-300 transition-colors shadow-sm w-fit"
+                                      >
+                                        <span>{item.assets.length} items</span>
+                                        <svg className={`w-3 h-3 transform transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                                      </button>
+                                    </div>
+                                  </div>
+                                </td>
+                                {renderAssetCols(firstAsset)}
+                              </tr>
+                              {/* Child Rows */}
+                              {isExpanded && remainingAssets.map((asset) => (
+                                <tr key={asset.id} className={`border-b cursor-pointer ${isDark ? 'bg-slate-800/40' : 'bg-gray-50/40'} ${tableRowClass}`} onClick={() => setDetailAsset(asset)}>
+                                  <td className="px-4 py-3 font-medium pl-14">
+                                    <div className="flex items-center gap-2 text-gray-400 dark:text-gray-500">
+                                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                                      <span className="text-xs font-normal">{asset.assigned_to_name || 'Sub-item'}</span>
+                                    </div>
+                                  </td>
+                                  {renderAssetCols(asset)}
+                                </tr>
+                              ))}
+                            </React.Fragment>
+                          );
+                        }
                       })}
                     </tbody>
                   </table>
@@ -574,7 +727,7 @@ export default function AssetManagementView({ isDark, currentUser, showToast }) 
                   <div className={`px-4 py-3 border-t flex items-center justify-between sm:px-6 ${isDark ? 'border-slate-700 bg-slate-800' : 'border-gray-100 bg-gray-50/50'}`}>
                     <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
                       <p className="text-sm text-gray-500 dark:text-gray-400">
-                        Showing <span className="font-medium text-gray-900 dark:text-white">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-medium text-gray-900 dark:text-white">{Math.min(currentPage * itemsPerPage, sortedFiltered.length)}</span> of <span className="font-medium text-gray-900 dark:text-white">{sortedFiltered.length}</span> results
+                        Showing <span className="font-medium text-gray-900 dark:text-white">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-medium text-gray-900 dark:text-white">{Math.min(currentPage * itemsPerPage, groupedFiltered.length)}</span> of <span className="font-medium text-gray-900 dark:text-white">{groupedFiltered.length}</span> results
                       </p>
                       <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                         <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-slate-600 disabled:opacity-50 transition-colors">

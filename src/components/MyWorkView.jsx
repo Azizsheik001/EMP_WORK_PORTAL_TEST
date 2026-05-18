@@ -22,7 +22,7 @@ export default function MyWorkView({
   const [activeTab, setActiveTab] = useState('shift');
 
   return (
-    <div className="space-y-4 max-w-6xl mx-auto w-full">
+    <div className="space-y-4 w-full h-full flex flex-col">
       {/* Sub-tab toggle */}
       <div className={`inline-flex rounded-lg p-1 ${isDark ? 'bg-slate-700/50' : 'bg-gray-100'}`}>
         {TABS.map((tab) => (
@@ -43,34 +43,36 @@ export default function MyWorkView({
       </div>
 
       {/* Content */}
-      {activeTab === 'shift' && (
-        <EmployeeView
-          isDark={isDark}
-          currentUser={currentUser}
-          clockedInAt={clockedInAt}
-          clockedInAtRaw={clockedInAtRaw}
-          onClockIn={onClockIn}
-          onClockOut={onClockOut}
-          isClockedIn={isClockedIn}
-          onLeaveRequest={onLeaveRequest}
-          onCancelLeave={onCancelLeave}
-          clients={clients}
-          apiShifts={apiShifts}
-          shiftsRefreshKey={shiftsRefreshKey}
-          leaveRequests={leaveRequests}
-        />
-      )}
+      <EmployeeView
+        isDark={isDark}
+        currentUser={currentUser}
+        clockedInAt={clockedInAt}
+        clockedInAtRaw={clockedInAtRaw}
+        onClockIn={onClockIn}
+        onClockOut={onClockOut}
+        isClockedIn={isClockedIn}
+        onLeaveRequest={onLeaveRequest}
+        onCancelLeave={onCancelLeave}
+        clients={clients}
+        apiShifts={apiShifts}
+        shiftsRefreshKey={shiftsRefreshKey}
+        leaveRequests={leaveRequests}
+        activeTab={activeTab}
+      />
+      
       {activeTab === 'leaves' && (
-        <LeavesView
-          leaveRequests={leaveRequests}
-          currentUser={currentUser}
-          onApprove={onApprove}
-          onReject={onReject}
-          onCancelLeave={onCancelLeave}
-          onSplitLeave={onSplitLeave}
-          isDark={isDark}
-          myOnly={true}
-        />
+        <div className="mt-8">
+          <LeavesView
+            leaveRequests={leaveRequests}
+            currentUser={currentUser}
+            onApprove={onApprove}
+            onReject={onReject}
+            onCancelLeave={onCancelLeave}
+            onSplitLeave={onSplitLeave}
+            isDark={isDark}
+            myOnly={true}
+          />
+        </div>
       )}
     </div>
   );

@@ -439,7 +439,7 @@ export default function LeavesView({ leaveRequests: rawLeaveRequests, allLeaveRe
   // My Leaves only view
   if (myOnly) {
     return (
-      <div className="space-y-6 max-w-5xl mx-auto w-full">
+      <div className="space-y-6 w-full h-full flex flex-col">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold text-gray-900 dark:text-white">My Leave Requests</h1>
           <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${myRequests.length > 0 ? 'bg-brand/10 text-brand' : 'bg-gray-100 dark:bg-slate-700 text-gray-500'}`}>
@@ -717,7 +717,7 @@ export default function LeavesView({ leaveRequests: rawLeaveRequests, allLeaveRe
     const isEmployee = userType === 'employee';
 
     return (
-      <div className="space-y-8 max-w-5xl mx-auto w-full">
+      <div className="space-y-8 w-full h-full flex flex-col">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold text-gray-900 dark:text-white">{isEmployee ? 'My Requests' : 'Requests'}</h1>
@@ -1207,7 +1207,41 @@ export default function LeavesView({ leaveRequests: rawLeaveRequests, allLeaveRe
                         </td>
                         <td className="px-4 py-3">{formatDateRange(r.start_date, r.end_date, r.total_days)}</td>
                         <td className="px-4 py-3"><span className="capitalize">{r.leave_type || '--'}</span>{r.reason && <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{r.reason}</p>}</td>
-                        <td className="px-4 py-3"><ApprovalProgress approvalChain={r.approvalChain} /></td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-between">
+                            <ApprovalProgress approvalChain={r.approvalChain} />
+                            {(isHRorFinance || userType === 'admin' || userType === 'manager') && onCancelLeave && (
+                              <div className="ml-4 flex-shrink-0">
+                                {cancelConfirm === r.id ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleConfirmCancel(r.id)}
+                                      className="text-xs px-2 py-1 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 transition-colors"
+                                    >
+                                      Confirm
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setCancelConfirm(null)}
+                                      className="text-xs px-2 py-1 rounded-lg border border-gray-300 dark:border-slate-600 text-gray-600 dark:text-gray-400 font-medium hover:bg-gray-100 dark:hover:bg-slate-700 transition-colors"
+                                    >
+                                      No
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setCancelConfirm(r.id)}
+                                    className="text-xs px-2.5 py-1 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 font-medium transition-colors"
+                                  >
+                                    Withdraw
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </td>
                       </tr>
                       );
                     })}
@@ -1500,7 +1534,7 @@ export default function LeavesView({ leaveRequests: rawLeaveRequests, allLeaveRe
 
   // Default: full view (backward compatible)
   return (
-    <div className="space-y-8 max-w-5xl mx-auto w-full">
+    <div className="space-y-8 w-full h-full flex flex-col">
       <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Leave Requests</h1>
 
       <section>

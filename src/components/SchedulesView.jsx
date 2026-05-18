@@ -250,7 +250,7 @@ export default function SchedulesView({ clients = [], isDark, defaultBuildMode =
   };
 
   return (
-    <div className="space-y-4 max-w-6xl mx-auto w-full">
+    <div className="space-y-4 w-full h-full flex flex-col">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Schedules</h1>
       </div>

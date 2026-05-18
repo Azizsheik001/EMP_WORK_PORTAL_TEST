@@ -39,8 +39,26 @@ function toDateStr(d) {
         UNIQUE(user_id, holiday_date)
       );
     `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS comp_off_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id),
+        shift_date DATE NOT NULL,
+        request_type VARCHAR(50) NOT NULL, -- 'week_off' or 'holiday'
+        hours_worked NUMERIC(5,2) NOT NULL,
+        earned_days NUMERIC(3,1) NOT NULL,
+        holiday_id UUID REFERENCES holidays(id),
+        holiday_name VARCHAR(200),
+        status VARCHAR(20) DEFAULT 'pending', -- pending, approved, rejected
+        approved_by UUID REFERENCES users(id),
+        rejected_by UUID REFERENCES users(id),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, shift_date)
+      );
+    `);
   } catch (e) {
-    console.warn('holidays/comp_offs table creation skipped:', e.message);
+    console.warn('holidays/comp_offs/requests table creation skipped:', e.message);
   }
 
   // Add expiry_date column to comp_offs if it doesn't exist
@@ -237,6 +255,68 @@ router.get('/comp-offs', authenticate, async (req, res, next) => {
   }
 });
 
+// ── GET /api/holidays/comp-off-requests — get pending comp off requests ──
+router.get('/comp-off-requests', authenticate, async (req, res, next) => {
+  try {
+    const r = await query(
+      `SELECT cr.*, u.name AS user_name, u.role
+       FROM comp_off_requests cr
+       JOIN users u ON u.id = cr.user_id
+       ORDER BY cr.created_at DESC`
+    );
+    const rows = r.rows.map(r => ({
+      ...r,
+      shift_date: toDateStr(r.shift_date)
+    }));
+    res.json({ requests: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ── PATCH /api/holidays/comp-off-requests/:id/:action — approve/reject ──
+router.patch('/comp-off-requests/:id/:action', authenticate, requireRole('admin', 'manager', 'team_lead'), async (req, res, next) => {
+  try {
+    const { id, action } = req.params;
+    if (action !== 'approve' && action !== 'reject') return res.status(400).json({ error: 'Invalid action' });
+
+    const status = action === 'approve' ? 'approved' : 'rejected';
+    const field = action === 'approve' ? 'approved_by' : 'rejected_by';
+
+    // Update request
+    const r = await query(
+      `UPDATE comp_off_requests SET status = $1, ${field} = $2, updated_at = NOW() WHERE id = $3 AND status = 'pending' RETURNING *`,
+      [status, req.user.sub, id]
+    );
+
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Request not found or already processed' });
+
+    const reqData = r.rows[0];
+
+    // If approved, create the actual comp_off record
+    if (status === 'approved') {
+      const bonus = reqData.request_type === 'holiday' ? 500 : 0;
+      
+      let expiryInterval = '1 month'; // default regional or week_off
+      if (reqData.holiday_id) {
+        const hRes = await query(`SELECT COALESCE(holiday_type, 'regional') as holiday_type FROM holidays WHERE id = $1`, [reqData.holiday_id]);
+        if (hRes.rows[0]?.holiday_type === 'national') expiryInterval = '1 year';
+      }
+
+      await query(
+        `INSERT INTO comp_offs (user_id, holiday_id, holiday_date, holiday_name, bonus_amount, comp_leave_days, expiry_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $3::date + INTERVAL '${expiryInterval}')
+         ON CONFLICT (user_id, holiday_date) DO NOTHING`,
+        [reqData.user_id, reqData.holiday_id, reqData.shift_date, reqData.holiday_name || (reqData.request_type === 'week_off' ? 'Week Off' : null), bonus, reqData.earned_days]
+      );
+    }
+
+    res.json({ request: reqData });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ── GET /api/holidays/comp-offs/all — admin view of all comp offs
 router.get('/comp-offs/all', authenticate, requireRole('admin', 'manager', 'team_lead'), async (req, res, next) => {
   try {
@@ -311,10 +391,12 @@ router.patch('/comp-offs/:id/use', authenticate, async (req, res, next) => {
   }
 });
 
-// ── Check & credit comp off on clock-in (called from shifts.js) ─
-// This is exported so shifts.js can call it after a successful clock-in
-export async function checkAndCreditCompOff(userId, shiftDate) {
+// ── Create comp off request on clock-out (called from shifts.js) ─
+// This is exported so shifts.js can call it after a successful clock-out
+export async function createCompOffRequest(userId, shiftDate, hoursWorked) {
   try {
+    if (hoursWorked < 4) return null;
+
     // Get user info
     const userResult = await query(`SELECT id, name FROM users WHERE id = $1`, [userId]);
     if (userResult.rowCount === 0) return null;
@@ -325,42 +407,54 @@ export async function checkAndCreditCompOff(userId, shiftDate) {
 
     const calendars = getUserCalendars(user);
 
-    // Check if shiftDate is a holiday that applies to this user
+    // 1. Check if shiftDate is a holiday
     const holidayResult = await query(
       `SELECT id, name, calendar, COALESCE(holiday_type, 'regional') as holiday_type FROM holidays
        WHERE holiday_date = $1 AND calendar = ANY($2)`,
       [shiftDate, calendars]
     );
-    if (holidayResult.rowCount === 0) return null;
 
-    const holiday = holidayResult.rows[0];
+    let isHoliday = false;
+    let isWeekOff = false;
+    let holidayData = null;
 
-    // Check if already credited
-    const existingResult = await query(
-      `SELECT id FROM comp_offs WHERE user_id = $1 AND holiday_date = $2`,
-      [userId, shiftDate]
-    );
-    if (existingResult.rowCount > 0) return null; // already credited
+    if (holidayResult.rowCount > 0) {
+      isHoliday = true;
+      holidayData = holidayResult.rows[0];
+    } else {
+      // 2. Check if shiftDate is a Week Off
+      const saResult = await query(
+        `SELECT is_off FROM shift_assignments WHERE user_id = $1 AND shift_date = $2`,
+        [userId, shiftDate]
+      );
+      if (saResult.rowCount > 0 && saResult.rows[0].is_off) {
+        isWeekOff = true;
+      }
+    }
 
-    // Expiry: national holidays → 1 year, regional holidays → 1 month
-    const expiryInterval = holiday.holiday_type === 'national' ? '1 year' : '1 month';
+    if (!isHoliday && !isWeekOff) return null;
 
-    // Credit comp off
+    const requestType = isHoliday ? 'holiday' : 'week_off';
+    const earnedDays = hoursWorked >= 8 ? 1.0 : 0.5;
+
+    // Check if a request already exists
+    const existing = await query(`SELECT id FROM comp_off_requests WHERE user_id = $1 AND shift_date = $2`, [userId, shiftDate]);
+    if (existing.rowCount > 0) return null; // already requested
+
     const r = await query(
-      `INSERT INTO comp_offs (user_id, holiday_id, holiday_date, holiday_name, bonus_amount, comp_leave_days, expiry_date)
-       VALUES ($1, $2, $3, $4, 500, 1, $3::date + INTERVAL '${expiryInterval}')
-       ON CONFLICT (user_id, holiday_date) DO NOTHING
+      `INSERT INTO comp_off_requests (user_id, shift_date, request_type, hours_worked, earned_days, holiday_id, holiday_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [userId, holiday.id, shiftDate, holiday.name]
+      [userId, shiftDate, requestType, hoursWorked, earnedDays, holidayData?.id || null, holidayData?.name || null]
     );
 
     if (r.rowCount > 0) {
-      console.log(`Comp off credited: ${user.name} worked on ${holiday.name} (${shiftDate})`);
+      console.log(`Comp off request created: ${user.name} worked ${hoursWorked.toFixed(1)}h on ${requestType} (${shiftDate})`);
       return r.rows[0];
     }
     return null;
   } catch (e) {
-    console.warn('checkAndCreditCompOff error:', e.message);
+    console.warn('createCompOffRequest error:', e.message);
     return null;
   }
 }

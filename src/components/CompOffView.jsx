@@ -15,7 +15,7 @@ function calendarBadge(cal, isDark) {
   return isDark ? 'bg-purple-900/30 text-purple-400' : 'bg-purple-100 text-purple-700';
 }
 
-export default function CompOffView({ isDark, currentUser, showToast }) {
+export default function CompOffView({ isDark, currentUser, showToast, myCompOffRequests = [] }) {
   const [holidays, setHolidays] = useState([]);
   const [userCalendars, setUserCalendars] = useState([]);
   const [compOffs, setCompOffs] = useState([]);
@@ -105,7 +105,7 @@ export default function CompOffView({ isDark, currentUser, showToast }) {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className={`rounded-xl border p-4 ${cardClass}`}>
           <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">Upcoming Holidays</p>
           <p className="text-2xl font-bold mt-1 text-brand">{upcomingHolidays.length}</p>
@@ -254,15 +254,39 @@ export default function CompOffView({ isDark, currentUser, showToast }) {
       {/* ── My Comp Offs Tab ──────────────────────── */}
       {tab === 'my-comp-offs' && (
         <div className="space-y-4">
-          {compOffs.length === 0 ? (
+          {myCompOffRequests.length > 0 && (
+            <div className={`rounded-xl border p-4 mb-4 ${isDark ? 'bg-amber-900/10 border-amber-800/30' : 'bg-amber-50 border-amber-200'}`}>
+              <h3 className={`text-sm font-medium mb-2 ${isDark ? 'text-amber-500' : 'text-amber-800'}`}>Pending Requests</h3>
+              <div className="space-y-2">
+                {myCompOffRequests.map(req => (
+                  <div key={req.id} className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-gray-200'}`}>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        Worked on {req.request_type === 'holiday' ? 'Holiday' : 'Week Off'} ({req.shift_date})
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {req.hours_worked} hours • Eligible for {req.earned_days} Comp Off
+                        {req.holiday_name ? ` • ${req.holiday_name}` : ''}
+                      </p>
+                    </div>
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">
+                      Pending Approval
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {compOffs.length === 0 && myCompOffRequests.length === 0 ? (
             <div className={`rounded-xl border p-8 text-center ${cardClass}`}>
               <svg className="w-12 h-12 mx-auto text-gray-300 dark:text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
               </svg>
-              <p className="text-sm text-gray-500 dark:text-gray-400">No comp offs earned yet.</p>
-              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Clock in on a holiday to earn comp leave + bonus.</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">No comp offs earned or requested yet.</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Clock in on a holiday or week off to earn comp leave.</p>
             </div>
-          ) : (
+          ) : compOffs.length > 0 ? (
             <div className={`rounded-xl border overflow-hidden ${cardClass}`}>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-full text-left text-sm">
@@ -299,7 +323,7 @@ export default function CompOffView({ isDark, currentUser, showToast }) {
                 </table>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       )}
 

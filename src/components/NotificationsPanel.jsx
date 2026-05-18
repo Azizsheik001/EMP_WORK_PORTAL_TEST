@@ -397,6 +397,10 @@ export default function NotificationsPanel({
   onDismissAlert,
   autoLogoutNotices = [],
   onDismissAutoLogout,
+  compOffRequests = [],
+  allCompOffRequests = [],
+  onApproveCompOffRequest,
+  onRejectCompOffRequest,
 }) {
   const contextLeaves =
     allLeaveRequests && allLeaveRequests.length > 0 ? allLeaveRequests : leaveRequests;
@@ -579,6 +583,33 @@ export default function NotificationsPanel({
 
   if (!isOpen) return null;
 
+  const unassignedUsers = currentUser?.type === 'admin'
+    ? (allUsers || []).filter(u => u.is_active !== false && u.role !== 'admin' && !u.department_id && (!u.department_ids || u.department_ids.length === 0))
+    : [];
+
+  const pendingCompOffRequests = compOffRequests.filter(r => {
+    // Only Managers, Team Leads, and Admins can approve comp-off requests
+    if (!currentUser || !['admin', 'manager', 'team_lead'].includes(currentUser.type)) return false;
+    // Don't show own requests to self
+    if (r.user_id === currentUser.id) return false;
+    
+    if (currentUser.type === 'admin') return true;
+    
+    // Team Leads/Managers: Check if requester is in their team
+    const requester = (allUsers || []).find((u) => u.id === r.user_id);
+    if (!requester) return false;
+    
+    if (currentUser.type === 'team_lead') {
+      return requester.team_lead_id === currentUser.id || (requester.team_lead_ids && requester.team_lead_ids.includes(currentUser.id));
+    }
+    
+    if (currentUser.type === 'manager') {
+      return requester.manager_id === currentUser.id || (requester.manager_ids && requester.manager_ids.includes(currentUser.id));
+    }
+    
+    return false;
+  });
+
   const isEmpty =
     pending.filter((r) => !dismissedIds.has(r.id)).length === 0 &&
     unacknowledged.length === 0 &&
@@ -590,6 +621,8 @@ export default function NotificationsPanel({
     pendingShreeNdas.length === 0 &&
     pendingDocuments.length === 0 &&
     completedDocuments.length === 0 &&
+    unassignedUsers.length === 0 &&
+    pendingCompOffRequests.length === 0 &&
     !showNdaCard;
 
   return (
@@ -857,6 +890,34 @@ export default function NotificationsPanel({
                         >
                           ✕
                         </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {unassignedUsers.length > 0 && (
+                <>
+                  <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
+                    Unassigned Users ({unassignedUsers.length})
+                  </p>
+
+                  {unassignedUsers.map((user) => (
+                    <div
+                      key={`unassigned-${user.id}`}
+                      className={`rounded-lg border-2 p-3 ${
+                        isDark ? 'border-amber-800/50 bg-amber-900/20' : 'border-amber-200 bg-amber-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                            {formatName(user.name) || 'Employee'}
+                          </p>
+                          <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                            This user is not assigned to any department.
+                          </p>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1252,6 +1313,65 @@ export default function NotificationsPanel({
                       </div>
                     );
                   })}
+                </>
+              )}
+
+              {pendingCompOffRequests.length > 0 && (
+                <>
+                  <p className="text-sm font-medium text-gray-600 dark:text-gray-400 mt-2">
+                    Comp Off requests ({pendingCompOffRequests.length})
+                  </p>
+
+                  {pendingCompOffRequests.map((req) => (
+                    <div
+                      key={req.id}
+                      className={`rounded-lg border-2 p-3 ${
+                        isDark ? 'border-green-800/50 bg-green-900/20' : 'border-green-200 bg-green-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {req.user_name || 'Employee'}
+                        </p>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300">
+                          {req.request_type === 'holiday' ? 'Holiday' : 'Week Off'}
+                        </span>
+                      </div>
+
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mt-0.5">
+                        Date: {req.shift_date}
+                      </p>
+
+                      <p className="text-sm text-gray-500 dark:text-gray-500 mt-0.5">
+                        Worked <span className="font-medium text-gray-700 dark:text-gray-300">{req.hours_worked}</span> hours 
+                        (Eligible for <span className="font-medium text-green-600 dark:text-green-400">{req.earned_days}</span> Comp Off)
+                      </p>
+
+                      {req.holiday_name && (
+                        <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+                          Holiday: {req.holiday_name}
+                        </p>
+                      )}
+
+                      <div className="flex gap-2 mt-3">
+                        <button
+                          type="button"
+                          onClick={() => onApproveCompOffRequest?.(req.id)}
+                          className="px-3 py-1.5 rounded-lg text-white text-sm font-medium bg-brand hover:bg-brand-hover"
+                        >
+                          Approve
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => onRejectCompOffRequest?.(req.id)}
+                          className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-medium"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </>
               )}
 

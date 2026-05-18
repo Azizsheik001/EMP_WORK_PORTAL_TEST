@@ -122,9 +122,12 @@ export default function UploadSchedules({ isDark, clients = [], allUsers = [] })
   const lastScheduledDate = addDays(startDate, totalWeeks * 7 - 1);
 
   const handleDownloadTemplate = useCallback(() => {
-    // Generate ALL dates for all weeks (not just week 1)
     const allTemplateDates = Array.from({ length: totalWeeks * 7 }, (_, i) => addDays(startDate, i));
-    const header = ['Employee Name', 'Employee ID', ...allTemplateDates.map((d, i) => `${DAY_LABELS[i % 7]} (${formatDateShort(d)})`)];
+    const header = ['Employee Name', 'Employee ID', ...allTemplateDates.map((d) => {
+      const dateObj = new Date(d + 'T00:00:00');
+      const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+      return `${dayName} (${formatDateShort(d)})`;
+    })];
     const rows = employees.map((emp) => {
       const name = (emp.name || '').replace(/,/g, ' ');
       const empId = emp.employee_no || '';
@@ -382,12 +385,16 @@ export default function UploadSchedules({ isDark, clients = [], allUsers = [] })
                   <tr className={isDark ? 'bg-slate-700' : 'bg-gray-50'}>
                     <th className="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Employee Name</th>
                     <th className="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Employee ID</th>
-                    {weekDates.map((d, i) => (
+                    {weekDates.map((d) => {
+                      const dateObj = new Date(d + 'T00:00:00');
+                      const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                      return (
                       <th key={d} className="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
-                        {DAY_LABELS[i]}<br />
+                        {dayName}<br />
                         <span className="font-normal text-gray-400">{formatDateShort(d)}</span>
                       </th>
-                    ))}
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -475,12 +482,16 @@ export default function UploadSchedules({ isDark, clients = [], allUsers = [] })
                     <thead>
                       <tr className={isDark ? 'bg-slate-700' : 'bg-gray-50'}>
                         <th className="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Employee</th>
-                        {weekDates.map((d, i) => (
+                        {weekDates.map((d) => {
+                          const dateObj = new Date(d + 'T00:00:00');
+                          const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                          return (
                           <th key={d} className="px-3 py-2 text-center font-medium text-gray-600 dark:text-gray-300">
-                            {DAY_LABELS[i]}<br />
+                            {dayName}<br />
                             <span className="font-normal text-gray-400">{formatDateShort(d)}</span>
                           </th>
-                        ))}
+                          );
+                        })}
                       </tr>
                     </thead>
                     <tbody>

@@ -238,6 +238,7 @@ export const api = {
     cancel: (id) => api.delete(`/api/leave-requests/${id}`),
     edit: (id, body) => api.patch(`/api/leave-requests/${id}/edit`, body),
     split: (id, excludeDates) => api.post(`/api/leave-requests/${id}/split`, { exclude_dates: excludeDates }),
+    adjustBalance: (userId, data) => api.put(`/api/leave-requests/balance/${userId}`, data),
   },
 
   shifts: (params) => {
@@ -445,6 +446,9 @@ export const api = {
     compOffsAll: () => api.get('/api/holidays/comp-offs/all'),
     useCompOff: (id, usedDate) => api.patch(`/api/holidays/comp-offs/${id}/use`, { used_date: usedDate }),
     compOffsByEmployee: (year) => api.get(`/api/holidays/comp-offs/by-employee${year ? `?year=${year}` : ''}`),
+    compOffRequests: () => api.get('/api/holidays/comp-off-requests'),
+    approveCompOffRequest: (id) => api.patch(`/api/holidays/comp-off-requests/${id}/approve`, {}),
+    rejectCompOffRequest: (id) => api.patch(`/api/holidays/comp-off-requests/${id}/reject`, {}),
   },
 
   ideas: {

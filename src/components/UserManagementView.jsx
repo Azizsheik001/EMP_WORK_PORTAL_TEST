@@ -2203,7 +2203,24 @@ function SendDocumentModal({
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Select Users</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium">Select Users</label>
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer hover:text-brand">
+                <input 
+                  type="checkbox" 
+                  className="accent-brand"
+                  checked={selectedUserIds.length === users.filter(u => u.is_active !== false).length && users.filter(u => u.is_active !== false).length > 0}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedUserIds(users.filter(u => u.is_active !== false).map(u => u.id));
+                    } else {
+                      setSelectedUserIds([]);
+                    }
+                  }}
+                />
+                Select All
+              </label>
+            </div>
             <div className={`border rounded-lg max-h-60 overflow-y-auto p-2 space-y-1 ${isDark ? "border-slate-700 bg-slate-900/50" : "border-gray-200 bg-gray-50"}`}>
               {users.filter(u => u.is_active !== false).map(u => (
                 <label key={u.id} className="flex items-center gap-2 p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded cursor-pointer">
